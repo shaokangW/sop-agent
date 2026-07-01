@@ -57,6 +57,13 @@ class McpClient:
 
     @classmethod
     def from_config(cls, cfg: Any) -> "McpClient":
+        if isinstance(cfg, dict):
+            return cls(
+                command=cfg.get("command"),
+                args=cfg.get("args", []),
+                url=cfg.get("url"),
+                env=cfg.get("env", {}),
+            )
         return cls(command=cfg.command, args=cfg.args, url=cfg.url, env=cfg.env)
 
     def discover_tools(self) -> list[Tool]:
