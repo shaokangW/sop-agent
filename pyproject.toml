@@ -1,0 +1,31 @@
+[project]
+name = "sopagent"
+version = "0.1.0"
+description = "SOP + harness agent prototype: declarative procedure, driven by a runtime engine"
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2.6",
+    "pyyaml>=6.0",
+    "openai>=1.30",
+    "jsonschema>=4.20",
+    "typer>=0.12",
+    "rich>=13.7",
+]
+
+[project.optional-dependencies]
+mcp = ["mcp>=0.9"]
+server = ["fastapi>=0.110", "uvicorn>=0.29"]
+dev = ["pytest>=8.0", "pytest-mock>=3.12", "httpx>=0.27", "fastapi>=0.110"]
+
+[project.scripts]
+sopagent = "sopagent.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sopagent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

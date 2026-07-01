@@ -1,0 +1,44 @@
+metadata:
+  name: research-report
+  version: "1.0"
+  description: Search a topic, then write a short report.
+
+variables:
+  topic: "${env.TOPIC}"
+
+llm_defaults:
+  provider: bailian
+  model: glm-5.2
+  temperature: 0.2
+
+stages:
+  - id: gather
+    steps:
+      - id: search
+        goal: "Summarize key facts about the topic."
+        prompt: |
+          Topic: ${topic}
+          Based on your knowledge, provide 2-3 key facts about the topic, then return
+          a JSON object with a single field "summary" containing a short bullet-style summary.
+        expected_output:
+          type: object
+          properties:
+            summary:
+              type: string
+          required: [summary]
+        retry:
+          max: 1
+          backoff: 2.0
+
+  - id: write
+    steps:
+      - id: draft
+        goal: "Write a concise markdown report from the gathered summary."
+        llm:
+          provider: bailian
+          model: glm-5.2
+          temperature: 0.4
+        prompt: |
+          Based on this summary, write a short markdown report:
+          ${stages.gather.search.output.summary}
+        save_artifact: report.md
