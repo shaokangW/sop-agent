@@ -12,6 +12,7 @@ from typing import Any, Callable, Iterator
 
 from ..llm.base import Message, tool_result_message
 from ..llm.router import LLMRouter
+from ..prompt_builder import build as build_prompt
 from ..sop.schema import LlmConfig
 from ..tools.base import to_openai_schema
 from ..tools.executor import ToolExecutor
@@ -19,11 +20,7 @@ from ..tools.registry import ToolRegistry
 from .approval import ApprovalPolicy
 from .events import ApprovalRequest, ToolExecutedEvent, TurnEvent
 
-_SYSTEM = (
-    "You are an interactive coding assistant working in a terminal. Use the available "
-    "tools to help the user. When the current request is done, reply with a concise text "
-    "summary (no tool call) to hand control back to the user. You can see prior turns."
-)
+_SYSTEM = build_prompt("chat")
 
 
 class InteractiveSession:

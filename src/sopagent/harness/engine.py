@@ -16,6 +16,7 @@ from typing import Any, Callable, Iterator
 
 from ..llm.base import Message, tool_result_message
 from ..llm.router import LLMRouter
+from ..prompt_builder import build as build_prompt
 from ..sop.schema import SOP, Step
 from ..tools.executor import ToolExecutor
 from ..tools.registry import ToolRegistry
@@ -237,10 +238,10 @@ class Engine:
         return False
 
     def _build_messages(self, step: Step, ctx: Context) -> list[Message]:
-        system_content = f"Goal: {step.goal}"
-        if step.expected_output is not None:
-            system_content += "\nRespond with valid JSON conforming to the expected schema."
-        system: Message = {"role": "system", "content": system_content}
+        system: Message = {
+            "role": "system",
+            "content": build_prompt("sop", goal=step.goal, expected_output=step.expected_output),
+        }
         user: Message = {"role": "user", "content": ctx.interpolate(step.prompt)}
         return [system, user]
 

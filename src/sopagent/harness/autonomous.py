@@ -17,6 +17,7 @@ from typing import Any, Callable, Iterator
 
 from ..llm.base import Message, tool_result_message
 from ..llm.router import LLMRouter
+from ..prompt_builder import build as build_prompt
 from ..sop.schema import LlmConfig
 from ..tools.base import to_openai_schema
 from ..tools.executor import ToolExecutor
@@ -125,17 +126,7 @@ class AutonomousAgent:
         return trace
 
     def _current_system(self) -> str:
-        parts = [_SYSTEM]
-        if self.plan:
-            lines = ["", "Plan:"]
-            for i, g in enumerate(self.plan):
-                mark = "(current)" if i == self.subgoal_idx else ("(done)" if i < self.subgoal_idx else "")
-                lines.append(f"  {i}. {g} {mark}".rstrip())
-            parts.append("\n".join(lines))
-            if self.subgoal_idx < len(self.plan):
-                parts.append(f"\nCurrent subgoal: {self.plan[self.subgoal_idx]}")
-                parts.append("Work on it with tools, then call `subgoal_done`. When all done, call `finish`.")
-        return "\n".join(parts)
+        return build_prompt("autonomous", plan=self.plan, subgoal_idx=self.subgoal_idx)
 
     def run_events(self) -> Iterator[Event]:
         messages: list[Message] = [
