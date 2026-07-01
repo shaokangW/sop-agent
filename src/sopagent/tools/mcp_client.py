@@ -114,13 +114,18 @@ def _extract_text(result: Any) -> str:
 
 
 def register_mcp_servers(
-    sop: Any,
+    sop_or_servers: Any,
     registry: Any,
     client_factory: Callable[[Any], McpClient] | None = None,
 ) -> None:
-    """Discover and register all tools from every MCP server declared in the SOP."""
+    """Discover and register all tools from every MCP server declared in the SOP or a dict."""
+    if isinstance(sop_or_servers, dict):
+        servers = sop_or_servers
+    else:
+        servers = getattr(sop_or_servers, "mcp_servers", None) or {}
     factory = client_factory or McpClient.from_config
-    for _server_id, cfg in (getattr(sop, "mcp_servers", None) or {}).items():
+    for _server_id, cfg in servers.items():
         client = factory(cfg)
         for tool in client.discover_tools():
-            registry.register(tool)
+            if not registry.has(tool.name):
+                registry.register(tool)

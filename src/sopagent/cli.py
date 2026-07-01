@@ -16,7 +16,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from .config import Settings
+from .config import Settings, load_mcp_servers
 from .harness import (
     ApprovalPolicy,
     ApprovalRequest,
@@ -45,6 +45,7 @@ def build_engine_from_sop(sop, settings: Settings) -> Engine:
     tool_registry = ToolRegistry()
     for tool in BUILTIN_TOOLS:
         tool_registry.register(tool)
+    register_mcp_servers(load_mcp_servers(), tool_registry)
     register_mcp_servers(sop, tool_registry)
     return Engine(
         sop=sop,
@@ -66,6 +67,7 @@ def build_agent(task: str, settings: Settings) -> AutonomousAgent:
     tool_registry = ToolRegistry()
     for tool in BUILTIN_TOOLS:
         tool_registry.register(tool)
+    register_mcp_servers(load_mcp_servers(), tool_registry)
     return AutonomousAgent(
         task=task,
         router=router,
@@ -193,6 +195,7 @@ def _build_session(approve_all: bool, max_turns: int) -> InteractiveSession:
     tool_registry = ToolRegistry()
     for tool in BUILTIN_TOOLS:
         tool_registry.register(tool)
+    register_mcp_servers(load_mcp_servers(), tool_registry)
     executor = ToolExecutor(tool_registry)
     return InteractiveSession(
         router=router,

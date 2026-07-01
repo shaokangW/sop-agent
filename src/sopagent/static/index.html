@@ -95,6 +95,10 @@
   <div class="info-row"><span class="k">工具调用</span><span class="v" id="s-tools-total">0</span></div>
   <h2>工具使用</h2>
   <div id="tool-stats"><div class="tool-stat"><span class="name">—</span></div></div>
+  <h2>已加载工具</h2>
+  <div id="config-tools" style="font-size:.76rem;color:var(--muted);"></div>
+  <h2>MCP 服务</h2>
+  <div id="config-mcp" style="font-size:.76rem;color:var(--muted);"></div>
 </aside>
 <main id="main">
   <div id="tabs">
@@ -184,6 +188,25 @@ async function switchSession(id) {
 }
 startChatSession();
 $('#new-session').onclick = newSession;
+(async function loadConfig() {
+  try {
+    const r = await (await fetch('/config')).json();
+    const tc = $('#config-tools'); tc.innerHTML = '';
+    for (const t of r.builtin_tools) {
+      const d = document.createElement('div'); d.style.padding='2px 0';
+      d.innerHTML = `<span style="color:var(--cyan)">${TOOL_ICONS[t.name]||'⚙️'} ${t.name}</span>${t.requires_approval?' <span style="color:var(--yellow)">需审批</span>':''}`;
+      tc.appendChild(d);
+    }
+    const mc = $('#config-mcp'); mc.innerHTML = '';
+    const servers = Object.entries(r.mcp_servers);
+    if (!servers.length) { mc.innerHTML = '<div>无（在 ~/.sop-agent/mcp.json 配置）</div>'; }
+    for (const [id, cfg] of servers) {
+      const d = document.createElement('div'); d.style.padding='2px 0';
+      d.innerHTML = `<span style="color:var(--accent)">${id}</span> <span style="color:var(--muted)">${cfg.command||cfg.url||''} ${(cfg.args||[]).join(' ')}</span>`;
+      mc.appendChild(d);
+    }
+  } catch (e) {}
+})();
 
 $('#task-form').addEventListener('submit', async (e) => {
   e.preventDefault();

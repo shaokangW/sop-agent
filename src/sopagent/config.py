@@ -130,3 +130,45 @@ class Settings:
         if not cfg.api_key:
             raise RuntimeError(f"provider '{name}' has no api_key configured")
         return cfg
+
+
+def load_mcp_servers() -> dict[str, dict]:
+    """Load MCP server configs from ~/.sop-agent/mcp.json and project .sop-agent/mcp.json.
+
+    Format: {"mcp_servers": {"<id>": {"command": "...", "args": [...], "env": {...}}}}
+    Also reads opencode's mcp config (~/.config/opencode/opencode.json `mcp` field)
+    so servers configured for opencode are reused.
+    """
+    servers: dict[str, dict] = {}
+    # opencode mcp config
+    cfg_dir = _opencode_config_dir()
+    for candidate in (cfg_dir / "opencode.json", cfg_dir / "opencode.jsonc"):
+        if not candidate.exists():
+            continue
+        try:
+            data = json.loads(_strip_jsonc(candidate.read_text(encoding="utf-8")))
+            mcp = data.get("mcp") or data.get("mcpServers") or {}
+            if isinstance(mcp, dict):
+                for sid, cfg in mcp.items():
+                    if isinstance(cfg, dict):
+                        servers[sid] = {
+                            "command": cfg.get("command"),
+                            "args": cfg.get("args", []),
+                            "env": cfg.get("env", {}),
+                            "url": cfg.get("url"),
+                        }
+            break
+        except (json.JSONDecodeError, OSError):
+            continue
+    # user / project overrides (higher priority)
+    for f in (Path.home() / ".sop-agent" / "mcp.json", Path.cwd() / ".sop-agent" / "mcp.json"):
+        if not f.exists():
+            continue
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                servers.update(data.get("mcp_servers", data))
+        except (json.JSONDecodeError, OSError):
+            continue
+    # filter out servers without command/url
+    return {k: v for k, v in servers.items() if v.get("command") or v.get("url")}

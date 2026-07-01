@@ -1,0 +1,18 @@
+metadata:
+  name: mcp-test
+  version: "1.0"
+llm_defaults:
+  provider: bailian
+  model: glm-5.2
+  temperature: 0.2
+mcp_servers:
+  test:
+    command: python
+    args: ["C:/Users/wsk/AppData/Local/Temp/opencode/mcp_server.py"]
+stages:
+  - id: calc
+    steps:
+      - id: add
+        goal: "用 MCP 的 add 工具计算"
+        prompt: "调用 add 工具，参数 a=3 b=5，然后把结果告诉我。"
+        tools: [add]

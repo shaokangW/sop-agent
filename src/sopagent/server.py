@@ -359,3 +359,22 @@ def chat_approve(session_id: str, req: ApproveRequest) -> dict[str, Any]:
     store["decision"] = "reject" if req.decision == "reject" else "approve"
     store["event"].set()
     return {"ok": True}
+
+
+@app.get("/config")
+def get_config() -> dict[str, Any]:
+    """List builtin tools + configured MCP servers (for the config page)."""
+    from .config import load_mcp_servers
+    from .tools import BUILTIN_TOOLS
+
+    return {
+        "builtin_tools": [
+            {
+                "name": t.name,
+                "description": getattr(t, "description", ""),
+                "requires_approval": getattr(t, "requires_approval", False),
+            }
+            for t in BUILTIN_TOOLS
+        ],
+        "mcp_servers": load_mcp_servers(),
+    }
