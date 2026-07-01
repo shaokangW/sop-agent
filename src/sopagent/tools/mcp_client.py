@@ -132,7 +132,11 @@ def register_mcp_servers(
         servers = getattr(sop_or_servers, "mcp_servers", None) or {}
     factory = client_factory or McpClient.from_config
     for _server_id, cfg in servers.items():
-        client = factory(cfg)
-        for tool in client.discover_tools():
-            if not registry.has(tool.name):
-                registry.register(tool)
+        try:
+            client = factory(cfg)
+            for tool in client.discover_tools():
+                if not registry.has(tool.name):
+                    registry.register(tool)
+        except Exception as exc:  # noqa: BLE001 - skip failed MCP server, don't block others
+            import sys
+            print(f"[mcp] server '{_server_id}' failed to load: {exc}", file=sys.stderr)
