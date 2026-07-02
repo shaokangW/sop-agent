@@ -35,10 +35,13 @@ from .harness import (
     Trace,
     TurnEvent,
 )
+from .harness.session_store import SessionStore
 from .sop.loader import load_sop, load_sop_from_text
 from .sop.schema import SOP
 
 app = FastAPI(title="sop-agent", version="0.1.0")
+
+_session_store = SessionStore()
 
 
 # --------------------------------------------------------------------------- models
@@ -52,6 +55,8 @@ class TaskRequest(BaseModel):
     approve_all_tools: bool = False
     approve_subgoals: bool = False
     max_turns: int = 20
+    provider: str | None = None
+    model: str | None = None
 
 
 class ApproveRequest(BaseModel):
@@ -74,8 +79,8 @@ def get_engine(sop: SOP, settings: Settings) -> Any:
     return build_engine_from_sop(sop, settings)
 
 
-def get_agent(task: str, settings: Settings, policy: ApprovalPolicy, max_turns: int) -> Any:
-    agent = build_agent(task, settings)
+def get_agent(task: str, settings: Settings, policy: ApprovalPolicy, max_turns: int, provider: str | None = None, model: str | None = None) -> Any:
+    agent = build_agent(task, settings, provider=provider, model=model)
     agent.approval_policy = policy
     agent.max_turns = max_turns
     return agent
@@ -99,9 +104,34 @@ def _serialize_event(ev: Any) -> dict[str, Any]:
     return {"type": "unknown"}
 
 
+def _serialize_subagent_event(ev: Any) -> dict[str, Any]:
+    """A sub-agent event forwarded via TaskTool.on_event (nested visibility)."""
+    if isinstance(ev, ToolExecutedEvent):
+        return {"type": "subagent_tool", "name": ev.name, "ok": ev.ok, "result": ev.result}
+    if isinstance(ev, TurnEvent):
+        return {"type": "subagent_turn", "content": ev.content, "tool_calls": ev.tool_calls}
+    return {"type": "subagent", "detail": _serialize_event(ev)}
+
+
+def _wire_subagent_events(store: dict[str, Any], owner: Any) -> None:
+    """Forward sub-agent (task tool) events into the live event stream."""
+    registry = getattr(owner, "tool_registry", None)
+    if registry is None:
+        return
+    try:
+        tool = registry.get("task")
+    except KeyError:
+        return
+    ctx = getattr(tool, "_ctx", None)
+    if ctx is None:
+        return
+    ctx.on_event = lambda ev: store["events"].append(_serialize_subagent_event(ev))
+
+
 def _runner(task_id: str, agent: Any) -> None:
     store = _tasks[task_id]
     store["agent"] = agent
+    _wire_subagent_events(store, agent)
 
     def _on_token(step_id: str, delta: str) -> None:
         store["events"].append({"type": "token", "step_id": step_id, "delta": delta})
@@ -157,6 +187,21 @@ def run_sop(req: RunRequest) -> dict[str, Any]:
     return trace_to_dict(trace)
 
 
+@app.post("/sop/validate")
+def validate_sop(req: RunRequest) -> dict[str, Any]:
+    """Parse + structurally validate a SOP without executing it."""
+    try:
+        sop = _load(req)
+    except (ValueError, yaml.YAMLError) as exc:
+        return {"ok": False, "error": str(exc)}
+    return {
+        "ok": True,
+        "metadata": {"name": sop.metadata.name, "version": sop.metadata.version},
+        "stages": [s.id for s in sop.stages],
+        "steps": sum(len(s.steps) for s in sop.stages),
+    }
+
+
 @app.post("/task")
 def start_task(req: TaskRequest) -> dict[str, Any]:
     settings = Settings.from_env()
@@ -164,7 +209,7 @@ def start_task(req: TaskRequest) -> dict[str, Any]:
         approve_all_tools=req.approve_all_tools,
         approve_subgoals=req.approve_subgoals,
     )
-    agent = get_agent(req.task, settings, policy, req.max_turns)
+    agent = get_agent(req.task, settings, policy, req.max_turns, provider=req.provider, model=req.model)
     task_id = uuid.uuid4().hex
     _tasks[task_id] = {
         "agent": agent,
@@ -215,6 +260,8 @@ def approve_task(task_id: str, req: ApproveRequest) -> dict[str, Any]:
 # --------------------------------------------------------------------------- multi-turn chat
 class ChatStartRequest(BaseModel):
     approve_all_tools: bool = False
+    provider: str | None = None
+    model: str | None = None
 
 
 class ChatSendRequest(BaseModel):
@@ -224,11 +271,11 @@ class ChatSendRequest(BaseModel):
 _chat_sessions: dict[str, dict[str, Any]] = {}
 
 
-def get_session(settings: Settings, policy: ApprovalPolicy) -> Any:
+def get_session(settings: Settings, policy: ApprovalPolicy, provider: str | None = None, model: str | None = None) -> Any:
     """InteractiveSession factory. Tests may monkeypatch this."""
     from .cli import _build_session
 
-    return _build_session(policy.approve_all_tools, 15)
+    return _build_session(policy.approve_all_tools, 15, provider=provider, model=model)
 
 
 def _run_chat(session_id: str, text: str) -> None:
@@ -242,8 +289,14 @@ def _run_chat(session_id: str, text: str) -> None:
     def _on_reasoning(step_id: str, delta: str) -> None:
         store["events"].append({"type": "reasoning", "step_id": step_id, "delta": delta})
 
+    def _on_compress(stats: dict) -> None:
+        store["events"].append({"type": "compress", "stats": stats})
+
     session.on_token = _on_token
     session.on_reasoning = _on_reasoning
+    if getattr(session, "context_manager", None):
+        session.context_manager.on_compress = _on_compress
+    _wire_subagent_events(store, session)
     gen = session.ask(text)
     try:
         ev = next(gen)
@@ -265,16 +318,46 @@ def _run_chat(session_id: str, text: str) -> None:
         pass
     except Exception as exc:  # noqa: BLE001
         store["events"].append({"type": "error", "message": str(exc)})
+    # persist to disk BEFORE signalling done, so callers that wait for the
+    # 'done' event always see the saved state (no resume race)
+    try:
+        _session_store.save(session_id, session.messages, title=store.get("title"))
+    except Exception:  # noqa: BLE001 - persistence must not lose the reply
+        pass
     store["events"].append({"type": "done"})
     store["running"] = False
+
+
+def _ensure_session(session_id: str, settings: Settings, policy: ApprovalPolicy) -> dict[str, Any] | None:
+    """Get the in-memory session, or rebuild it from the store (cross-restart resume)."""
+    st = _chat_sessions.get(session_id)
+    if st is not None:
+        return st
+    rec = _session_store.load(session_id)
+    if rec is None:
+        return None
+    session = get_session(settings, policy)
+    session.messages = list(rec.get("messages") or [])
+    st = {
+        "session": session,
+        "events": [],
+        "pending": None,
+        "event": threading.Event(),
+        "decision": None,
+        "running": False,
+        "created_at": rec.get("created_at", time()),
+        "title": rec.get("title", "新对话"),
+    }
+    _chat_sessions[session_id] = st
+    return st
 
 
 @app.post("/chat/start")
 def chat_start(req: ChatStartRequest) -> dict[str, Any]:
     settings = Settings.from_env()
     policy = ApprovalPolicy(approve_all_tools=req.approve_all_tools)
-    session = get_session(settings, policy)
-    session_id = uuid.uuid4().hex
+    session = get_session(settings, policy, provider=req.provider, model=req.model)
+    session_id = _session_store.create()
     _chat_sessions[session_id] = {
         "session": session,
         "events": [],
@@ -294,24 +377,31 @@ def chat_start(req: ChatStartRequest) -> dict[str, Any]:
 
 @app.get("/chat/sessions")
 def chat_sessions() -> list[dict[str, Any]]:
-    items = []
+    # durable list from disk, annotated with live running state
+    items = {i["id"]: i for i in _session_store.list_sessions()}
     for sid, st in _chat_sessions.items():
-        items.append({"id": sid, "title": st["title"], "created_at": st["created_at"]})
-    items.sort(key=lambda x: x["created_at"], reverse=True)
-    return items
+        if sid in items:
+            items[sid]["running"] = st["running"]
+        else:
+            items[sid] = {
+                "id": sid, "title": st["title"], "created_at": st["created_at"],
+                "updated_at": st["created_at"], "message_count": len(st["session"].messages),
+                "running": st["running"],
+            }
+    return sorted(items.values(), key=lambda x: x.get("updated_at", x.get("created_at", 0)), reverse=True)
 
 
 @app.get("/chat/{session_id}/history")
 def chat_history(session_id: str) -> dict[str, Any]:
-    store = _chat_sessions.get(session_id)
-    if store is None:
+    st = _chat_sessions.get(session_id)
+    messages = st["session"].messages if st is not None else (_session_store.load(session_id) or {}).get("messages", [])
+    if st is None and not messages:
         raise HTTPException(status_code=404, detail="unknown session_id")
     msgs = []
-    for m in store["session"].messages:
+    for m in messages:
         role = m.get("role")
         if role in ("user", "assistant"):
             content = m.get("content") or ""
-            # skip assistant messages that were pure tool_calls (no text)
             if role == "assistant" and not content:
                 continue
             msgs.append({"role": role, "content": content})
@@ -320,14 +410,15 @@ def chat_history(session_id: str) -> dict[str, Any]:
 
 @app.post("/chat/{session_id}/send")
 def chat_send(session_id: str, req: ChatSendRequest) -> dict[str, Any]:
-    store = _chat_sessions.get(session_id)
-    if store is None:
+    settings = Settings.from_env()
+    policy = ApprovalPolicy()
+    st = _ensure_session(session_id, settings, policy)
+    if st is None:
         raise HTTPException(status_code=404, detail="unknown session_id")
-    if store["running"]:
+    if st["running"]:
         raise HTTPException(status_code=409, detail="agent is still running")
-    # set title from first user message
-    if store["title"] == "新对话":
-        store["title"] = req.text[:30] or "新对话"
+    if st["title"] == "新对话":
+        st["title"] = req.text[:30] or "新对话"
     threading.Thread(target=_run_chat, args=(session_id, req.text), daemon=True).start()
     return {"ok": True}
 
@@ -361,12 +452,29 @@ def chat_approve(session_id: str, req: ApproveRequest) -> dict[str, Any]:
     return {"ok": True}
 
 
+@app.delete("/chat/{session_id}")
+def chat_delete(session_id: str) -> dict[str, Any]:
+    _chat_sessions.pop(session_id, None)
+    deleted = _session_store.delete(session_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="unknown session_id")
+    return {"ok": True}
+
+
 @app.get("/config")
 def get_config() -> dict[str, Any]:
-    """List builtin tools + configured MCP servers (for the config page)."""
+    """List builtin tools + configured MCP servers + available providers."""
     from .config import load_mcp_servers
     from .tools import BUILTIN_TOOLS
 
+    settings = Settings.from_env()
+    providers = []
+    for name, cfg in settings.providers.items():
+        providers.append({
+            "name": name,
+            "base_url": cfg.base_url,
+            "configured": bool(cfg.api_key),
+        })
     return {
         "builtin_tools": [
             {
@@ -377,4 +485,61 @@ def get_config() -> dict[str, Any]:
             for t in BUILTIN_TOOLS
         ],
         "mcp_servers": load_mcp_servers(),
+        "providers": providers,
     }
+
+
+# --------------------------------------------------------------------------- artifacts + traces browser
+def _safe_child(base: Path, child: str) -> Path:
+    """Resolve `child` under `base`, rejecting path traversal."""
+    target = (base / child).resolve()
+    try:
+        target.relative_to(base.resolve())
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail="path escapes base directory") from exc
+    return target
+
+
+@app.get("/artifacts")
+def list_artifacts() -> dict[str, Any]:
+    base = Path(Settings.from_env().artifacts_dir)
+    files: list[dict[str, Any]] = []
+    if base.is_dir():
+        for p in sorted(base.rglob("*")):
+            if p.is_file():
+                rel = p.relative_to(base).as_posix()
+                files.append({"path": rel, "size": p.stat().st_size})
+    return {"dir": str(base), "artifacts": files}
+
+
+@app.get("/artifacts/{file_path:path}")
+def get_artifact(file_path: str) -> dict[str, Any]:
+    base = Path(Settings.from_env().artifacts_dir)
+    target = _safe_child(base, file_path)
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="artifact not found")
+    return {"path": file_path, "content": target.read_text(encoding="utf-8", errors="replace")}
+
+
+@app.get("/traces")
+def list_traces() -> dict[str, Any]:
+    base = Path(Settings.from_env().traces_dir)
+    files: list[dict[str, Any]] = []
+    if base.is_dir():
+        for p in sorted(base.glob("*.jsonl")):
+            st = p.stat()
+            files.append({"name": p.name, "size": st.st_size, "mtime": st.st_mtime})
+    return {"dir": str(base), "traces": files}
+
+
+@app.get("/traces/{name}")
+def get_trace(name: str) -> dict[str, Any]:
+    from .harness import replay_jsonl
+
+    if "/" in name or "\\" in name or name.startswith("."):
+        raise HTTPException(status_code=400, detail="invalid trace name")
+    base = Path(Settings.from_env().traces_dir)
+    target = _safe_child(base, name)
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="trace not found")
+    return {"name": name, "records": replay_jsonl(target)}

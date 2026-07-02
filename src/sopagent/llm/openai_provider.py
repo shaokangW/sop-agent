@@ -51,7 +51,7 @@ class OpenAIProvider:
                     ToolCall(id=tc.id, name=tc.function.name, arguments=arguments)
                 )
 
-        return LLMResponse(content=choice.content, tool_calls=tool_calls, raw=resp)
+        return LLMResponse(content=choice.content, tool_calls=tool_calls, raw=resp, usage=_usage(resp))
 
     def chat_stream(
         self,
@@ -68,6 +68,7 @@ class OpenAIProvider:
             "messages": messages,
             "temperature": config.temperature,
             "stream": True,
+            "stream_options": {"include_usage": True},
         }
         if tools:
             kwargs["tools"] = tools
@@ -80,8 +81,11 @@ class OpenAIProvider:
         tc_args: dict[int, str] = {}
         tc_names: dict[int, str] = {}
         tc_ids: dict[int, str] = {}
+        usage: dict[str, int] | None = None
         for chunk in stream:
             if not chunk.choices:
+                # final usage-only chunk arrives with empty choices
+                usage = _usage(chunk)
                 continue
             delta = chunk.choices[0].delta
             if delta is None:
@@ -110,4 +114,15 @@ class OpenAIProvider:
             except json.JSONDecodeError:
                 args = {"_raw": tc_args.get(idx, "")}
             tool_calls.append(ToolCall(id=tc_ids[idx], name=tc_names[idx], arguments=args))
-        return LLMResponse(content=content, tool_calls=tool_calls, reasoning="".join(reasoning_parts))
+        return LLMResponse(content=content, tool_calls=tool_calls, reasoning="".join(reasoning_parts), usage=usage)
+
+
+def _usage(resp: Any) -> dict[str, int] | None:
+    u = getattr(resp, "usage", None)
+    if u is None:
+        return None
+    return {
+        "prompt_tokens": getattr(u, "prompt_tokens", 0) or 0,
+        "completion_tokens": getattr(u, "completion_tokens", 0) or 0,
+        "total_tokens": getattr(u, "total_tokens", 0) or 0,
+    }

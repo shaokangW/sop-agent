@@ -8,11 +8,14 @@ __pycache__/
 
 # Runtime artifacts
 .artifacts/
+.traces/
 .todos.json
 .chat_history
+.sop-agent/
 
 # Logs
 *.log
+*.db
 
 # IDE
 .vscode/

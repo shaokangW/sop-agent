@@ -88,11 +88,18 @@
   <h2>模型</h2>
   <div class="info-row"><span class="k">Provider</span><span class="v" id="m-provider">—</span></div>
   <div class="info-row"><span class="k">Model</span><span class="v" id="m-model">—</span></div>
+  <div style="margin-top:6px;">
+    <select id="prov-sel" style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:4px;border-radius:4px;font-size:.8rem;"></select>
+    <input id="model-input" placeholder="模型名(留空用默认)" style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:4px;border-radius:4px;font-size:.8rem;margin-top:4px;">
+    <div style="font-size:.7rem;color:var(--muted);margin-top:2px;">下次新建会话/任务生效</div>
+  </div>
   <h2>本次运行</h2>
   <div class="info-row"><span class="k">模式</span><span class="v" id="s-mode">对话</span></div>
   <div class="info-row"><span class="k">状态</span><span class="v" id="s-status">空闲</span></div>
   <div class="info-row"><span class="k">轮次</span><span class="v" id="s-turns">0</span></div>
   <div class="info-row"><span class="k">工具调用</span><span class="v" id="s-tools-total">0</span></div>
+  <div class="info-row"><span class="k">Tokens</span><span class="v" id="s-tokens">—</span></div>
+  <div class="info-row"><span class="k">压缩</span><span class="v" id="s-compress">0 次</span></div>
   <h2>工具使用</h2>
   <div id="tool-stats"><div class="tool-stat"><span class="name">—</span></div></div>
   <h2>已加载工具</h2>
@@ -105,6 +112,8 @@
     <div class="tab active" data-mode="chat">💬 对话</div>
     <div class="tab" data-mode="task">🎯 任务</div>
     <div class="tab" data-mode="sop">📋 SOP</div>
+    <div class="tab" data-mode="artifacts">📦 产物</div>
+    <div class="tab" data-mode="traces">📊 Trace</div>
   </div>
   <div id="messages"></div>
   <div id="input-bar">
@@ -114,8 +123,10 @@
     </form>
     <div id="sop-input" class="input-row" style="display:none">
       <textarea id="sop-yaml" placeholder="粘贴 SOP YAML（metadata/llm_defaults/stages/...）"></textarea>
+      <button id="validate-sop" type="button" style="background:#21262d;color:var(--text);border:1px solid var(--border);padding:0 16px;border-radius:8px;cursor:pointer;">校验</button>
       <button id="run-sop" type="button">运行 SOP</button>
     </div>
+    <span id="sop-validate-msg" style="display:block;font-size:.8rem;margin:4px auto 0;max-width:900px;"></span>
   </div>
 </main>
 <script>
@@ -134,18 +145,95 @@ document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () =>
   document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
   t.classList.add('active');
   mode = t.dataset.mode;
-  $('#s-mode').textContent = mode === 'chat' ? '对话' : mode === 'task' ? '任务' : 'SOP';
-  $('#task-form').style.display = mode === 'sop' ? 'none' : '';
+  const modeLabel = {chat:'对话', task:'任务', sop:'SOP', artifacts:'产物', traces:'Trace'}[mode];
+  $('#s-mode').textContent = modeLabel;
+  $('#task-form').style.display = (mode === 'sop' || mode === 'artifacts' || mode === 'traces') ? 'none' : '';
   $('#sop-input').style.display = mode === 'sop' ? '' : 'none';
   $('#messages').innerHTML = '';
   resetTurn();
   if (mode === 'chat' && !sessionId) startChatSession();
-  $('#send-btn').disabled = mode === 'sop' || mode === 'task' ? (mode === 'task' ? false : true) : false;
+  if (mode === 'artifacts') loadArtifacts();
+  if (mode === 'traces') loadTraces();
+  $('#send-btn').disabled = !(mode === 'chat' || mode === 'task');
 }));
+
+async function loadTraces() {
+  $('#s-status').textContent = '加载 trace…';
+  try {
+    const r = await (await fetch('/traces')).json();
+    $('#s-status').textContent = r.traces.length ? `trace ${r.traces.length} 个` : '空闲';
+    if (!r.traces.length) { addMsg('assistant', '_（暂无 trace,用 `--trace` 运行或 SOP 完成后生成）_'); return; }
+    let html = '### Trace 时间线\n| 文件 | 大小 |\n|---|---|\n';
+    for (const t of r.traces) html += `| \`${t.name}\` | ${t.size} B |\n`;
+    html += '\n点击文件名查看每轮回放:';
+    addMsg('assistant', html);
+    const list = document.createElement('div');
+    for (const t of r.traces) {
+      const item = document.createElement('div'); item.className='tool-item';
+      item.innerHTML = `<span class="icon">📊</span><span class="name">${t.name}</span><span class="status ok">${t.size} B</span>`;
+      item.onclick = async () => {
+        try { const f = await (await fetch('/traces/'+encodeURIComponent(t.name))).json(); renderTrace(f.records); }
+        catch (e) { addMsg('assistant', '⚠️ 读取失败'); }
+      };
+      list.appendChild(item);
+    }
+    $('#messages').appendChild(list); scrollBottom();
+  } catch (e) { $('#s-status').textContent = '加载失败'; }
+}
+
+function renderTrace(records) {
+  const box = document.createElement('div'); box.className='tool-group expanded';
+  const h = document.createElement('div'); h.className='tool-group-header';
+  h.innerHTML = `<span class="icon">📊</span><span class="title">trace 回放</span><span class="count">${records.length} 行</span><span class="arrow">▼</span>`;
+  const list = document.createElement('div'); list.className='tool-list';
+  for (const rec of records) {
+    if (rec.kind === 'turn') {
+      const item = document.createElement('div'); item.className='tool-item';
+      const u = rec.usage ? ` <span style="color:var(--yellow)">${rec.usage.total_tokens} tok</span>` : '';
+      item.innerHTML = `<span class="icon">▸</span><span class="name">${rec.role}</span><span style="color:var(--muted);font-size:.78rem">[${rec.step_id}#${rec.turn}]</span><span class="status ok">${(rec.content_preview||'').slice(0,120)}</span>${u}`;
+      list.appendChild(item);
+    } else if (rec.kind === 'summary') {
+      const item = document.createElement('div'); item.className='tool-item';
+      const u = rec.usage||{};
+      item.innerHTML = `<span class="icon">✓</span><span class="name" style="color:var(--green)">summary</span><span class="status ok">${rec.sop_name} · ${rec.turns} turns · ${u.total_tokens||0} tok</span>`;
+      list.appendChild(item);
+    }
+  }
+  box.appendChild(h); box.appendChild(list);
+  $('#messages').appendChild(box); scrollBottom();
+}
+
+async function loadArtifacts() {
+  $('#s-status').textContent = '加载产物…';
+  try {
+    const r = await (await fetch('/artifacts')).json();
+    $('#s-status').textContent = r.artifacts.length ? `产物 ${r.artifacts.length} 个` : '空闲';
+    if (!r.artifacts.length) { addMsg('assistant', '_（暂无产物，运行 SOP 的 `save_artifact` 步骤会在此生成）_'); return; }
+    let html = '### 产物浏览器\n| 文件 | 大小 |\n|---|---|\n';
+    for (const a of r.artifacts) html += `| \`${a.path}\` | ${a.size} B |\n`;
+    html += '\n点击文件名查看内容:';
+    addMsg('assistant', html);
+    const list = document.createElement('div');
+    for (const a of r.artifacts) {
+      const item = document.createElement('div'); item.className='tool-item';
+      item.innerHTML = `<span class="icon">📄</span><span class="name">${a.path}</span><span class="status ok">${a.size} B</span>`;
+      item.onclick = async () => {
+        try { const f = await (await fetch('/artifacts/'+encodeURIComponent(a.path))).json();
+          addMsg('assistant', `### ${f.path}\n\`\`\`\n${(f.content||'').slice(0,4000)}\n\`\`\``); }
+        catch (e) { addMsg('assistant', '⚠️ 读取失败'); }
+      };
+      list.appendChild(item);
+    }
+    $('#messages').appendChild(list); scrollBottom();
+  } catch (e) { $('#s-status').textContent = '加载失败'; }
+}
+
+function selProv() { return $('#prov-sel').value || null; }
+function selModel() { const v = $('#model-input').value.trim(); return v || null; }
 
 async function startChatSession() {
   try {
-    const r = await (await fetch('/chat/start', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({approve_all_tools:false})})).json();
+    const r = await (await fetch('/chat/start', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({approve_all_tools:false, provider:selProv(), model:selModel()})})).json();
     sessionId = r.session_id;
     $('#m-provider').textContent = r.model.provider;
     $('#m-model').textContent = r.model.model;
@@ -158,17 +246,23 @@ async function loadSessions() {
     const list = await (await fetch('/chat/sessions')).json();
     const el = $('#session-list'); el.innerHTML = '';
     for (const s of list) {
+      const row = document.createElement('div'); row.style.display='flex'; row.style.alignItems='center';
       const d = document.createElement('div'); d.className = 's-item' + (s.id===sessionId?' active':'');
+      d.style.flex='1';
       d.textContent = s.title;
-      d.title = new Date(s.created_at*1000).toLocaleString();
+      d.title = new Date(s.created_at*1000).toLocaleString() + (s.message_count!=null?` · ${s.message_count} 条`:'');
       d.onclick = () => switchSession(s.id);
-      el.appendChild(d);
+      const del = document.createElement('button'); del.textContent='×'; del.title='删除';
+      del.style.cssText='background:transparent;border:none;color:var(--muted);cursor:pointer;padding:2px 6px;font-size:1rem;flex-shrink:0;';
+      del.onclick = async (e) => { e.stopPropagation(); if (!confirm('删除该会话?')) return; await fetch(`/chat/${s.id}`,{method:'DELETE'}); if (s.id===sessionId){sessionId=null;$('#messages').innerHTML='';} loadSessions(); };
+      row.appendChild(d); row.appendChild(del);
+      el.appendChild(row);
     }
   } catch (e) {}
 }
 async function newSession() {
   if (pollTimer) return;
-  const r = await (await fetch('/chat/start', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({approve_all_tools:false})})).json();
+  const r = await (await fetch('/chat/start', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({approve_all_tools:false, provider:selProv(), model:selModel()})})).json();
   sessionId = r.session_id;
   $('#m-provider').textContent = r.model.provider; $('#m-model').textContent = r.model.model;
   $('#messages').innerHTML = ''; resetTurn();
@@ -205,6 +299,16 @@ $('#new-session').onclick = newSession;
       d.innerHTML = `<span style="color:var(--accent)">${id}</span> <span style="color:var(--muted)">${cfg.command||cfg.url||''} ${(cfg.args||[]).join(' ')}</span>`;
       mc.appendChild(d);
     }
+    const ps = $('#prov-sel');
+    if (!ps.options.length) {
+      const def = document.createElement('option'); def.value=''; def.textContent='(默认 bailian)';
+      ps.appendChild(def);
+      for (const p of (r.providers||[])) {
+        const o = document.createElement('option'); o.value=p.name;
+        o.textContent = p.name + (p.configured ? '' : ' (未配置)');
+        ps.appendChild(o);
+      }
+    }
   } catch (e) {}
 })();
 
@@ -222,7 +326,7 @@ $('#task-form').addEventListener('submit', async (e) => {
       offset = base.next_offset;
       await fetch(`/chat/${sessionId}/send`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({text})});
     } else {  // task
-      const r = await (await fetch('/task', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({task:text, max_turns:20})})).json();
+      const r = await (await fetch('/task', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({task:text, max_turns:20, provider:selProv(), model:selModel()})})).json();
       taskId = r.task_id;
       $('#m-provider').textContent = r.model.provider;
       $('#m-model').textContent = r.model.model;
@@ -242,7 +346,20 @@ $('#run-sop').addEventListener('click', async () => {
     $('#s-status').textContent = r.success ? '完成 ✓' : '完成 ✗';
     const steps = (r.steps||[]).map(s => `step ${s.step_id}: ${s.status}, ${s.turns} turns`).join('\n');
     addMsg('assistant', '### SOP Trace\n```\n' + steps + '\n```');
+    if (r.usage) $('#s-tokens').textContent = `${r.usage.total_tokens} (p${r.usage.prompt_tokens}/c${r.usage.completion_tokens})`;
   } catch (e) { $('#s-status').textContent = '错误:'+e; }
+});
+
+$('#validate-sop').addEventListener('click', async () => {
+  const yaml = $('#sop-yaml').value.trim();
+  const msg = $('#sop-validate-msg');
+  if (!yaml) { msg.textContent = '⚠️ 请先粘贴 YAML'; msg.style.color = 'var(--yellow)'; return; }
+  msg.textContent = '校验中…'; msg.style.color = 'var(--muted)';
+  try {
+    const r = await (await fetch('/sop/validate', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({sop_yaml:yaml})})).json();
+    if (r.ok) { msg.innerHTML = `✓ 有效：<span style="color:var(--cyan)">${r.metadata.name}</span> · ${r.stages.length} 阶段 / ${r.steps} 步`; msg.style.color = 'var(--green)'; }
+    else { msg.textContent = '✗ ' + r.error; msg.style.color = 'var(--red)'; }
+  } catch (e) { msg.textContent = '✗ 请求失败'; msg.style.color = 'var(--red)'; }
 });
 
 async function poll() {
@@ -256,12 +373,22 @@ async function poll() {
     else if (ev.type === 'turn') { endTurn(); turns = (ev.turn||0)+1; updateStats(); }
     else if (ev.type === 'tool') { addToolToGroup(ev.name, ev.ok, ev.result); toolsTotal++; toolCounts[ev.name]=(toolCounts[ev.name]||0)+1; updateStats(); }
     else if (ev.type === 'approval') { addApproval(ev); }
+    else if (ev.type === 'subagent_tool') { addSubagentItem(ev.name, ev.ok, ev.result); }
+    else if (ev.type === 'subagent_turn') { if (ev.content) addSubagentItem(null, null, ev.content, true); }
+    else if (ev.type === 'compress') {
+      const st = ev.stats || {};
+      const saved = (st.before_tokens||0) - (st.after_tokens||0);
+      const n = (parseInt($('#s-compress').textContent)||0) + 1;
+      $('#s-compress').textContent = n + ' 次';
+      addMsg('assistant', `_✦ 上下文已压缩(第 ${n} 次):${st.middle_messages||0} 条历史 → 摘要,省 ~${saved} tokens_`);
+    }
     else if (ev.type === 'done') {
       endTurn();
       $('#s-status').textContent = '空闲';
       $('#send-btn').disabled = false;
+      const tr = ev.trace;
+      if (tr && tr.usage) $('#s-tokens').textContent = `${tr.usage.total_tokens} (p${tr.usage.prompt_tokens}/c${tr.usage.completion_tokens})`;
       clearInterval(pollTimer); pollTimer = null;
-      const tr = ev.trace; if (tr && tr.duration) {}  // task mode trace
     }
     else if (ev.type === 'error') { addMsg('assistant', '⚠️ '+ev.message); }
   }
@@ -321,6 +448,25 @@ function addToolToGroup(name, ok, result) {
   list.appendChild(item);
   const cnt = list.children.length;
   curToolGroup.querySelector('.count').textContent = cnt + ' 次';
+  scrollBottom();
+}
+
+function addSubagentItem(name, ok, result, isTurn) {
+  endTurn();
+  const list = ensureToolGroup();
+  const item = document.createElement('div'); item.className='tool-item';
+  item.style.paddingLeft='20px';
+  if (isTurn) {
+    item.innerHTML = `<span class="icon">🐾</span><span class="name" style="color:var(--muted)">子agent</span><span class="status ok" style="color:var(--muted)">${(result||'').slice(0,140)}</span>`;
+  } else {
+    item.innerHTML = `<span class="icon">🐾</span><span class="name" style="color:var(--muted)">${name}</span><span class="status ${ok?'ok':'fail'}">${ok?'✓':'✗'}</span>`;
+    if (result) {
+      const det = document.createElement('div'); det.className='tool-detail'; det.innerHTML = `<pre>${(result||'').slice(0,1500)}</pre>`;
+      item.appendChild(det);
+      item.onclick = (e) => { e.stopPropagation(); item.classList.toggle('expanded'); };
+    }
+  }
+  list.appendChild(item);
   scrollBottom();
 }
 

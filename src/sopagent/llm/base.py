@@ -22,6 +22,7 @@ class LLMResponse:
     tool_calls: list[ToolCall] = field(default_factory=list)
     raw: Any = None
     reasoning: str = ""
+    usage: dict[str, int] | None = None  # {prompt_tokens, completion_tokens, total_tokens}
 
     def assistant_message(self) -> Message:
         msg: Message = {"role": "assistant"}

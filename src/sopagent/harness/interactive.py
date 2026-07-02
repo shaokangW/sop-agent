@@ -18,6 +18,7 @@ from ..tools.base import to_openai_schema
 from ..tools.executor import ToolExecutor
 from ..tools.registry import ToolRegistry
 from .approval import ApprovalPolicy
+from .context_window import ContextWindowManager
 from .events import ApprovalRequest, ToolExecutedEvent, TurnEvent
 
 _SYSTEM = build_prompt("chat")
@@ -33,6 +34,7 @@ class InteractiveSession:
         approval_policy: ApprovalPolicy | None = None,
         on_token: Callable[[str, str], None] | None = None,
         max_turns: int = 15,
+        context_manager: ContextWindowManager | None = None,
     ) -> None:
         self.router = router
         self.tool_registry = tool_registry
@@ -42,6 +44,7 @@ class InteractiveSession:
         self.on_token = on_token
         self.on_reasoning: Callable[[str, str], None] | None = None
         self.max_turns = max_turns
+        self.context_manager = context_manager
         self.messages: list[Message] = [{"role": "system", "content": _SYSTEM}]
 
     def reset(self) -> None:
@@ -53,6 +56,8 @@ class InteractiveSession:
     def ask(self, user_input: str) -> Iterator[Any]:
         """Run one user turn: append user msg, drive tool loop until a text reply."""
         self.messages.append({"role": "user", "content": user_input})
+        if self.context_manager is not None:
+            self.messages = self.context_manager.maybe_compress(self.messages)
         tool_schemas = [to_openai_schema(t) for t in self.tool_registry.all()]
 
         for turn in range(self.max_turns):

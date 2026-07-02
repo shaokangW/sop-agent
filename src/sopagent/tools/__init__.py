@@ -1,6 +1,6 @@
 """Tool layer: registry, executor, built-ins, MCP adapter."""
 from .base import Tool, ToolResult, to_openai_schema
-from .builtin import BUILTIN_TOOLS, EchoTool, STANDARD_TOOLS
+from .builtin import BUILTIN_TOOLS, EchoTool, STANDARD_TOOLS, SubAgentContext, TaskTool
 from .executor import ToolExecutor, results_to_messages
 from .mcp_client import McpClient
 from .registry import ToolRegistry
@@ -15,5 +15,7 @@ __all__ = [
     "BUILTIN_TOOLS",
     "STANDARD_TOOLS",
     "EchoTool",
+    "TaskTool",
+    "SubAgentContext",
     "McpClient",
 ]

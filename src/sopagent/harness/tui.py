@@ -59,6 +59,7 @@ class ChatTUI:
         self.mode = "chat"
         self._approval_event = threading.Event()
         self._decision: str | None = None
+        self._reasoning_buf: list[str] = []
         self.viewport_height = 10
         self._build()
 
@@ -175,6 +176,11 @@ class ChatTUI:
         return False
 
     def _flush_markdown(self) -> None:
+        if self._reasoning_buf:
+            text = "".join(self._reasoning_buf)
+            self._reasoning_buf.clear()
+            if text.strip():
+                self.out.append_line("  💭 " + text.strip()[:800] + "\n", "class:dim")
         if self.out.cur:
             text = "".join(self.out.cur)
             if not text.endswith("\n"):
@@ -187,7 +193,16 @@ class ChatTUI:
 
     # -- agent turn (background thread) -----------------------------------
     def _run_turn(self, text: str) -> None:
+        self._reasoning_buf = []
         self.session.on_token = lambda _sid, d: (self.out.stream_token(d), self._refresh())
+        self.session.on_reasoning = lambda _sid, d: self._reasoning_buf.append(d)
+        cm = getattr(self.session, "context_manager", None)
+        if cm is not None:
+            def _on_compress(stats):
+                saved = (stats.get("before_tokens", 0) - stats.get("after_tokens", 0))
+                self.out.append_line(f"  ✦ 上下文已压缩(省 ~{saved} tokens)\n", "class:dim")
+                self._refresh()
+            cm.on_compress = _on_compress
         gen = self.session.ask(text)
         try:
             ev = next(gen)

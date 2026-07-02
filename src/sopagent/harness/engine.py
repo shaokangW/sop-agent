@@ -187,7 +187,7 @@ class Engine:
             else:
                 resp = self.router.chat(messages, schemas, llm)
             tc_dicts = [asdict(tc) for tc in resp.tool_calls]
-            self.tracer.turn(step.id, turn, "assistant", resp.content, tc_dicts)
+            self.tracer.turn(step.id, turn, "assistant", resp.content, tc_dicts, usage=resp.usage)
             yield TurnEvent(step.id, turn, resp.content, tc_dicts)
             messages.append(resp.assistant_message())
 

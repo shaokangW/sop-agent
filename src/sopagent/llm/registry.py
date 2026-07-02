@@ -2,8 +2,12 @@
 from __future__ import annotations
 
 from ..config import Settings
+from .anthropic_provider import AnthropicProvider
 from .base import LLMProvider
 from .openai_provider import OpenAIProvider
+
+# providers that speak the OpenAI-compatible chat completions protocol
+_OPENAI_COMPATIBLE = {"openai", "bailian", "deepseek", "qwen", "ollama"}
 
 
 class ProviderRegistry:
@@ -24,7 +28,10 @@ class ProviderRegistry:
         for name, cfg in settings.providers.items():
             if cfg.api_key is None:
                 continue
-            # All configured providers speak the OpenAI-compatible protocol
-            # (openai, bailian/百炼, deepseek, qwen via base_url, ...).
-            registry.register(OpenAIProvider(cfg))
+            if name == "anthropic":
+                # native Messages API (not OpenAI-compatible)
+                registry.register(AnthropicProvider(cfg))
+            elif name in _OPENAI_COMPATIBLE:
+                registry.register(OpenAIProvider(cfg))
+            # unknown providers are skipped intentionally
         return registry

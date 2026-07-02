@@ -81,7 +81,7 @@ def test_task_approval_resume_flow(monkeypatch) -> None:
         DoneEvent(_FakeTrace()),
     ]
     agent = _FakeAgent(events)
-    monkeypatch.setattr(server, "get_agent", lambda task, settings, policy, max_turns: agent)
+    monkeypatch.setattr(server, "get_agent", lambda task, settings, policy, max_turns, **kw: agent)
     client = TestClient(server.app)
 
     r = client.post("/task", json={"task": "do x", "approve_all_tools": True})
@@ -117,8 +117,74 @@ def test_approve_unknown_task_404() -> None:
 
 def test_bad_decision_400(monkeypatch) -> None:
     agent = _FakeAgent([ApprovalRequest(id="t1", reason="r", payload={})])
-    monkeypatch.setattr(server, "get_agent", lambda task, settings, policy, max_turns: agent)
+    monkeypatch.setattr(server, "get_agent", lambda task, settings, policy, max_turns, **kw: agent)
     client = TestClient(server.app)
     tid = client.post("/task", json={"task": "x"}).json()["task_id"]
     r = client.post(f"/task/{tid}/approve", json={"decision": "maybe"})
     assert r.status_code == 400
+
+
+def test_sop_validate_ok() -> None:
+    client = TestClient(server.app)
+    r = client.post("/sop/validate", json={"sop_yaml": _MINIMAL_SOP_YAML}).json()
+    assert r["ok"] is True
+    assert r["metadata"]["name"] == "x"
+    assert r["steps"] == 1
+
+
+def test_sop_validate_bad() -> None:
+    client = TestClient(server.app)
+    r = client.post("/sop/validate", json={"sop_yaml": "metadata: {name: x}\nllm_defaults: {}\nstages: x"}).json()
+    assert r["ok"] is False
+    assert r["error"]
+
+
+def test_config_lists_providers() -> None:
+    client = TestClient(server.app)
+    r = client.get("/config").json()
+    names = [p["name"] for p in r["providers"]]
+    assert "bailian" in names and "anthropic" in names and "ollama" in names
+    assert all("configured" in p for p in r["providers"])
+
+
+def test_wire_subagent_events_forwards_to_store() -> None:
+    from sopagent.harness import ToolExecutedEvent, TurnEvent
+
+    class _Ctx:
+        def __init__(self) -> None:
+            self.on_event = None
+
+    class _Tool:
+        def __init__(self) -> None:
+            self._ctx = _Ctx()
+
+    class _Reg:
+        def __init__(self) -> None:
+            self.t = _Tool()
+
+        def get(self, name):
+            if name == "task":
+                return self.t
+            raise KeyError(name)
+
+    store: dict = {"events": []}
+    reg = _Reg()
+    owner = type("_Owner", (), {"tool_registry": reg})()
+    assert reg.t._ctx.on_event is None
+    server._wire_subagent_events(store, owner)
+    assert reg.t._ctx.on_event is not None  # wired
+
+    reg.t._ctx.on_event(ToolExecutedEvent("task", "tc1", "echo", True, "hi"))
+    reg.t._ctx.on_event(TurnEvent("task", 0, "thinking...", []))
+    assert store["events"][0]["type"] == "subagent_tool"
+    assert store["events"][0]["name"] == "echo"
+    assert store["events"][1]["type"] == "subagent_turn"
+    assert store["events"][1]["content"] == "thinking..."
+
+
+def test_wire_subagent_events_no_task_tool_is_noop() -> None:
+    class _Reg:
+        def get(self, name):
+            raise KeyError(name)
+    owner = type("_O", (), {"tool_registry": _Reg()})()
+    server._wire_subagent_events({"events": []}, owner)  # must not raise

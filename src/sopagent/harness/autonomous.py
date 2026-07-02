@@ -149,7 +149,7 @@ class AutonomousAgent:
                 else:
                     resp = self.router.chat(messages, tool_schemas, self.llm_config)
                 tc_dicts = [asdict(tc) for tc in resp.tool_calls]
-                self.tracer.turn("task", turn, "assistant", resp.content, tc_dicts)
+                self.tracer.turn("task", turn, "assistant", resp.content, tc_dicts, usage=resp.usage)
                 yield TurnEvent("task", turn, resp.content, tc_dicts)
                 messages.append(resp.assistant_message())
 

@@ -98,6 +98,7 @@ class Settings:
     providers: dict[str, ProviderConfig] = field(default_factory=dict)
     artifacts_dir: str = ".artifacts"
     traces_dir: str = ".traces"
+    sessions_dir: str = ".sop-agent/sessions"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -120,6 +121,20 @@ class Settings:
             name="openai",
             base_url=_env("OPENAI_BASE_URL"),
             api_key=_env("OPENAI_API_KEY"),
+        )
+
+        # Anthropic native (Clape) Messages API — separate provider class.
+        providers["anthropic"] = ProviderConfig(
+            name="anthropic",
+            base_url=_env("ANTHROPIC_BASE_URL"),  # optional proxy
+            api_key=_env("ANTHROPIC_API_KEY"),
+        )
+
+        # Ollama local (OpenAI-compatible endpoint; no real key needed).
+        providers["ollama"] = ProviderConfig(
+            name="ollama",
+            base_url=_env("OLLAMA_BASE_URL") or "http://localhost:11434/v1",
+            api_key="ollama",  # dummy key — Ollama ignores auth
         )
         return cls(providers=providers)
 
