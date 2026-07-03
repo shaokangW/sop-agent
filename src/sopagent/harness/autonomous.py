@@ -93,6 +93,7 @@ class AutonomousAgent:
         on_token: Callable[[str, str], None] | None = None,
         approval_policy: ApprovalPolicy | None = None,
         max_turns: int = 20,
+        available_skills: list[dict] | None = None,
     ) -> None:
         self.task = task
         self.router = router
@@ -107,6 +108,7 @@ class AutonomousAgent:
         self.summary: str | None = None
         self.plan: list[str] | None = None
         self.subgoal_idx: int = 0
+        self.available_skills = available_skills or []
 
     def run(self) -> Any:
         gen = self.run_events()
@@ -126,7 +128,7 @@ class AutonomousAgent:
         return trace
 
     def _current_system(self) -> str:
-        return build_prompt("autonomous", plan=self.plan, subgoal_idx=self.subgoal_idx)
+        return build_prompt("autonomous", plan=self.plan, subgoal_idx=self.subgoal_idx, available_skills=self.available_skills)
 
     def run_events(self) -> Iterator[Event]:
         messages: list[Message] = [

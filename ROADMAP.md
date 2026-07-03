@@ -103,3 +103,44 @@ trace 落盘 + token 统计 + 回放。
 - ✅ 修复 bug:`traces show` 对扁平 `asdict(ToolCall)` 格式 tool_calls 显示 `None(None)`(原假设 OpenAI 嵌套 `function.name`),改为兼容两种格式 + 回归断言
 
 测试:+7(provider 透传 / config providers / wire_subagent 透传+容错 / CLI traces list+show+missing),共 117。
+
+---
+
+## #7 skill 能力 [规划中 → v1 实现]
+
+agent 自主按需加载的"工作流技能包",介于 tool(原子)和 SOP(完整流程)之间。摘要进 prompt 让 agent 知道有啥,全文按需 `skill` 工具加载不占常驻 context。参照 opencode Agent Skills + Claude Code Skills + agentskills.io 开放标准。
+
+**与现有概念区分**:prompt_builder 分层文档=全程静态注入的稳定规则;skill=按需动态加载的专门工作流;SOP=用户显式 run 的确定性流程;tool=原子操作;TaskTool 子 agent=委派独立子任务(子 agent 也能调 skill)。
+
+### 设计要点
+- 结构:`<name>/SKILL.md`(YAML frontmatter + markdown body)+ 可选 `templates/`/`scripts/`/`refs/` 支持文件
+- frontmatter v1:`name`(必,`^[a-z0-9]+(-[a-z0-9]+)*$`,匹配目录名)/`description`(必,≤1024)/`triggers`(可选)/`tools`(可选)/`modes`(可选,默认全模式)
+- 分层发现(高覆盖低,沿用 prompt_builder 约定):`~/.sop-agent/skills/` > `<project>/.sop-agent/skills/` > `<cwd>/skills/` > 内置 `sopagent/skills/`
+- `SkillRegistry`:扫描+解析+`available(mode)`+`load(name)`;名称校验/去重/损坏跳过
+- `SkillTool`(contextual,仿 TaskTool):`skill({name})` 注入 body+资源列表;name 仅允许已注册
+- prompt 注入:`build(available_skills=)` 在 stable prefix 拼 `## Available Skills` 列表;mode 门控仅 chat/autonomous
+- 集成:自主/对话模式注册 SkillTool+传 available_skills;SOP 不接(保持纯粹);子 agent 继承 SkillTool
+- 安全:内容来自用户自放目录(同 prompt_builder 信任边界);skill 触发的工具调用照常审批;不装不可信 skill
+- 协同:#4 skill 调用入 trace;#1 子 agent 继承;#2 压缩覆盖 skill 消息;cache boundary 放 stable prefix
+
+### v1 ✅(本次实现,14 测试 + 真实 LLM 验证)
+- `skills/registry.py`(`Skill`+`SkillRegistry`)+ `skills/__init__.py`;分层 low→high(`_LAYERS` 内置→cwd→.sop-agent→全局 home),`load_default(layers=)` 可注入便测
+- `tools/builtin/skill.py`(`SkillTool`,contextual 仿 TaskTool);description 动态列 available(opencode 风格)
+- 2 内置示例:`debug-test`、`code-review`
+- `prompt_builder.build(available_skills=)` 在 stable prefix 拼 `## Available Skills`(cache 友好,cache boundary 之前)
+- 接入:`AutonomousAgent`/`InteractiveSession` 接 `available_skills`;cli `build_agent`/`_build_session` 构建 registry+注册 SkillTool+传;server 经 build 自动获得;SOP 不接(保持纯粹);子 agent 经 TaskTool delegate 复制工具集自动继承 SkillTool
+- `prompts/tools.md` 加 Skill 笔记
+- 测试 14:解析+load / mode 过滤 / 分层覆盖 / 坏名跳过 / 缺 frontmatter 跳过 / 损坏 yaml 跳过 / skill 工具 load+资源 / 未知名 ERROR / 缺 name / description 列 available / prompt 注入 / cache boundary 之前 / 内置默认加载 / agent 实调 skill
+- 真实验证(百炼 GLM-5.2):`task` 让 GLM 调 `skill(code-review)` → 返回工作流 → Summary 回答第一步(`▸ skill ok: # Skill: code-review...`,15785 tokens)
+
+### v2(后续)
+- 参数化:`$ARGUMENTS`/`$0` + CLI/Web `/skill-name` 命令
+- 调用控制:`disable_model_invocation`(仅用户)/`user_invocable:false`(仅 agent)
+- 动态上下文注入:`!`cmd`` 加载时执行 shell 替换占位符
+- skill 权限:allow/deny/ask 模式匹配
+- SOP step 引用 skill
+
+### v3(后续)
+- live reload(目录变化热加载)
+- skill eval(仿 skill-creator:A/B + 基准)
+- 跨工具标准兼容(`.claude/skills/`、agentskills.io)

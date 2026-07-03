@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .skill import SkillTool
 from .stdlib import STANDARD_TOOLS
 from .task import SubAgentContext, TaskTool
 
@@ -20,8 +21,8 @@ class EchoTool:
         return arguments.get("text", "")
 
 
-# Stateless tools auto-registered in every registry. TaskTool is contextual
-# (needs runtime deps) and is wired explicitly by the CLI/server builders.
+# Stateless tools auto-registered in every registry. TaskTool/SkillTool are
+# contextual (need runtime deps) and wired explicitly by the CLI/server builders.
 BUILTIN_TOOLS = [EchoTool(), *STANDARD_TOOLS]
 
-__all__ = ["BUILTIN_TOOLS", "EchoTool", "STANDARD_TOOLS", "TaskTool", "SubAgentContext"]
+__all__ = ["BUILTIN_TOOLS", "EchoTool", "STANDARD_TOOLS", "TaskTool", "SubAgentContext", "SkillTool"]

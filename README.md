@@ -53,6 +53,7 @@ dynamic suffix（每轮变化）     autonomous: Plan+子目标 / sop: step goal
 - **三种模式**：SOP（预编排）/ 自主（agent 自决 + plan + finish）/ 对话（多轮）
 - **工具集**（参照 opencode/claude-code）：`read_file` `write_file` `edit_file` `list_dir` `grep` `bash` `web_fetch` `todo_write` `echo` `task`（子 agent 委派，全新上下文 + 深度限制）；危险工具（write/edit/bash）自动需审批
 - **子 agent 委派**：`task` 工具把独立子任务派给拥有**全新上下文**的子 agent（不继承父对话历史，省 token），完成后回传摘要 + 工具日志；最大嵌套深度限制防递归，边界子 agent 无 `task` 工具
+- **Skill 技能包**：`<name>/SKILL.md`（frontmatter + 工作流）+ 可选 templates/scripts/refs 支持文件；分层发现（`~/.sop-agent/skills` > 项目 `.sop-agent/skills` > `skills/` > 内置）；agent 自主按需调 `skill` 工具加载工作流（摘要进 prompt、全文按需注入，省 context）；内置 `debug-test`/`code-review` 示例
 - **MCP 协议**：支持自写 / 社区现成 / 复用 opencode 配置的 MCP server（stdio + SSE），三模式全局加载
 - **人在回路审批**：动作级（tool call）+ 阶段级（step/subgoal）；三选项「本次允许 / 对话允许 / 拒绝」
 - **流式 + 思考过程**：原生 tool_calls 循环 + `reasoning_content` 流式（GLM-5.2 思考链，Web 灰色 `think` 块显示）
@@ -145,6 +146,8 @@ python -m sopagent.cli traces show autonomous-<ts>.jsonl
 
 CLI `task`/`run` 默认实时打印工具调用（`▸ tool ok: 预览`），`task` 工具的子 agent 摘要会展开输出；`_render_trace` 末尾显示 token 用量。
 
+**Skill**:在 `~/.sop-agent/skills/<name>/SKILL.md` 或项目 `skills/<name>/SKILL.md` 放自定义工作流,agent 任务匹配时自主调 `skill` 工具加载(内置 `debug-test`/`code-review` 示例见 `src/sopagent/skills/`)。
+
 ### 写自己的 SOP
 
 ```yaml
@@ -177,11 +180,12 @@ src/sopagent/
 ├── prompts/                内置 prompt 文档（base/agents/soul/tools/chat/autonomous/sop .md）
 ├── sop/                    SOP 模型 + loader
 ├── llm/                    LLM 抽象（openai_provider / anthropic_provider / router / stream / reasoning / usage）
-├── tools/                  工具层（builtin 10 工具含 task 委派 + MCP + executor）
+├── tools/                  工具层（builtin 10 工具含 task 委派 + skill 技能 + MCP + executor）
 ├── harness/                引擎（engine/autonomous/interactive/approval/events/transitions/tui/markdown_render/context_window/session_store/tracer）
+├── skills/                 Skill 技能包（registry + 内置 debug-test/code-review SKILL.md）
 └── tui/                    自研 TUI 框架（OpenTUI 移植：buffer/renderable/widgets）
 sops/                       SOP 示例（research.yaml + mcp_test.yaml）
-tests/                      测试（117，覆盖 loader/engine/transitions/approval/autonomous/tools/server/tui/config/stream + 6 项新能力）
+tests/                      测试（131，覆盖 ... + 6 项新能力 + skill）
 ```
 
 ## 测试

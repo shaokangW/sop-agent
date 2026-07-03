@@ -21,8 +21,6 @@ from .approval import ApprovalPolicy
 from .context_window import ContextWindowManager
 from .events import ApprovalRequest, ToolExecutedEvent, TurnEvent
 
-_SYSTEM = build_prompt("chat")
-
 
 class InteractiveSession:
     def __init__(
@@ -35,6 +33,7 @@ class InteractiveSession:
         on_token: Callable[[str, str], None] | None = None,
         max_turns: int = 15,
         context_manager: ContextWindowManager | None = None,
+        available_skills: list[dict] | None = None,
     ) -> None:
         self.router = router
         self.tool_registry = tool_registry
@@ -45,10 +44,14 @@ class InteractiveSession:
         self.on_reasoning: Callable[[str, str], None] | None = None
         self.max_turns = max_turns
         self.context_manager = context_manager
-        self.messages: list[Message] = [{"role": "system", "content": _SYSTEM}]
+        self.available_skills = available_skills or []
+        self.messages: list[Message] = [{"role": "system", "content": self._system()}]
+
+    def _system(self) -> str:
+        return build_prompt("chat", available_skills=self.available_skills)
 
     def reset(self) -> None:
-        self.messages = [{"role": "system", "content": _SYSTEM}]
+        self.messages = [{"role": "system", "content": self._system()}]
 
     def tool_names(self) -> list[str]:
         return [t.name for t in self.tool_registry.all()]

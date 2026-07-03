@@ -32,8 +32,9 @@ from .harness import (
 from .llm import LLMRouter, ProviderRegistry
 from .sop.loader import load_sop
 from .sop.schema import LlmConfig
+from .skills import SkillRegistry
 from .tools import BUILTIN_TOOLS, ToolExecutor, ToolRegistry
-from .tools.builtin import SubAgentContext, TaskTool
+from .tools.builtin import SkillTool, SubAgentContext, TaskTool
 from .tools.mcp_client import register_mcp_servers
 
 app = typer.Typer(add_completion=False, help="SOP + harness agent prototype")
@@ -91,6 +92,8 @@ def build_agent(task: str, settings: Settings, provider: str | None = None, mode
         tool_registry.register(tool)
     register_mcp_servers(load_mcp_servers(), tool_registry)
     llm_config = LlmConfig(provider=provider or "bailian", model=model or "glm-5.2")
+    skill_registry = SkillRegistry.load_default()
+    tool_registry.register(SkillTool(skill_registry))
     _register_task_tool(router, tool_registry, llm_config, settings)
     return AutonomousAgent(
         task=task,
@@ -100,6 +103,7 @@ def build_agent(task: str, settings: Settings, provider: str | None = None, mode
         artifacts=ArtifactStore(settings.artifacts_dir),
         llm_config=llm_config,
         tracer=Tracer("autonomous"),
+        available_skills=skill_registry.available("autonomous"),
     )
 
 
@@ -261,6 +265,8 @@ def _build_session(approve_all: bool, max_turns: int, provider: str | None = Non
         tool_registry.register(tool)
     register_mcp_servers(load_mcp_servers(), tool_registry)
     llm_config = LlmConfig(provider=provider or "bailian", model=model or "glm-5.2")
+    skill_registry = SkillRegistry.load_default()
+    tool_registry.register(SkillTool(skill_registry))
     _register_task_tool(router, tool_registry, llm_config, settings, max_turns=max_turns)
     executor = ToolExecutor(tool_registry)
     from .harness.context_window import ContextWindowManager
@@ -274,6 +280,7 @@ def _build_session(approve_all: bool, max_turns: int, provider: str | None = Non
         approval_policy=ApprovalPolicy(approve_all_tools=approve_all),
         max_turns=max_turns,
         context_manager=ContextWindowManager(router=router, llm_config=llm_config),
+        available_skills=skill_registry.available("chat"),
     )
 
 

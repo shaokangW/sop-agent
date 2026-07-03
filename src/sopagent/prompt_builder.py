@@ -48,9 +48,9 @@ def build(mode: str, **ctx: Any) -> str:
     """Build the system prompt for a mode (chat | autonomous | sop).
 
     Dynamic ctx:
-      autonomous: plan=list[str], subgoal_idx=int
+      autonomous: plan=list[str], subgoal_idx=int, available_skills=list[dict]
       sop:        goal=str, expected_output=dict|None
-      (any):      runtime=str  (extra runtime info appended to dynamic suffix)
+      (any):      available_skills=list[{name,description}], runtime=str  (extra runtime info appended to dynamic suffix)
     """
     lines: list[str] = []
     total = 0
@@ -71,6 +71,18 @@ def build(mode: str, **ctx: Any) -> str:
     add("Operation Rules", "agents")
     add("Style", "soul")
     add("Tool Notes", "tools")
+
+    # ---- available skills (stable; startup-determined, cache-friendly) ----
+    skills = ctx.get("available_skills") or []
+    if skills:
+        slines = ["## Available Skills"]
+        for s in skills:
+            slines.append(f"- `{s.get('name')}`: {s.get('description','')}")
+        slines.append("任务匹配时调用 `skill` 工具加载详细工作流,再按其步骤执行。")
+        block = "\n".join(slines)
+        if total + len(block) <= _MAX_TOTAL:
+            lines.append(block)
+            total += len(block)
 
     # ---- mode-gated section ----
     if mode == "chat":
