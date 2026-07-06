@@ -133,7 +133,7 @@
 const TOOL_ICONS = { read_file:'📄', write_file:'✏️', edit_file:'🔧', list_dir:'📂', grep:'🔍', bash:'💻', web_fetch:'🌐', todo_write:'✅', echo:'🔁', finish:'🏁', plan:'📋', subgoal_done:'✔️' };
 const $ = s => document.querySelector(s);
 let mode = 'chat';
-let sessionId = null, taskId = null, pollTimer = null, offset = 0;
+let sessionId = null, taskId = null, sopRunId = null, pollTimer = null, offset = 0;
 let turns = 0, toolsTotal = 0, toolCounts = {};
 let curAssistant = null, curText = '', curReasoning = '', curReasoningEl = null;
 let curToolGroup = null, curToolList = null;  // current turn's tool group
@@ -226,6 +226,27 @@ async function loadArtifacts() {
     }
     $('#messages').appendChild(list); scrollBottom();
   } catch (e) { $('#s-status').textContent = '加载失败'; }
+}
+
+async function loadArtifactsIntoMessages() {
+  // append artifacts to the current message stream (used after SOP done)
+  try {
+    const r = await (await fetch('/artifacts')).json();
+    if (!r.artifacts.length) { addMsg('assistant', '_（无产物生成）_'); return; }
+    addMsg('assistant', `### 📦 产物（${r.artifacts.length} 个，点击查看）`);
+    const list = document.createElement('div');
+    for (const a of r.artifacts) {
+      const item = document.createElement('div'); item.className='tool-item';
+      item.innerHTML = `<span class="icon">📄</span><span class="name">${a.path}</span><span class="status ok">${a.size} B</span>`;
+      item.onclick = async () => {
+        try { const f = await (await fetch('/artifacts/'+encodeURIComponent(a.path))).json();
+          addMsg('assistant', `### ${f.path}\n\`\`\`\n${(f.content||'').slice(0,4000)}\n\`\`\``); }
+        catch (e) { addMsg('assistant', '⚠️ 读取失败'); }
+      };
+      list.appendChild(item);
+    }
+    $('#messages').appendChild(list); scrollBottom();
+  } catch (e) {}
 }
 
 function selProv() { return $('#prov-sel').value || null; }
@@ -340,13 +361,14 @@ $('#run-sop').addEventListener('click', async () => {
   const yaml = $('#sop-yaml').value.trim();
   if (!yaml) return;
   $('#messages').innerHTML = ''; resetTurn();
-  $('#s-status').textContent = '运行中…（同步）';
+  turns=0; toolsTotal=0; toolCounts={}; $('#s-tokens').textContent='—'; updateStats();
+  $('#s-status').textContent = '运行中';
   try {
-    const r = await (await fetch('/run', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({sop_yaml:yaml})})).json();
-    $('#s-status').textContent = r.success ? '完成 ✓' : '完成 ✗';
-    const steps = (r.steps||[]).map(s => `step ${s.step_id}: ${s.status}, ${s.turns} turns`).join('\n');
-    addMsg('assistant', '### SOP Trace\n```\n' + steps + '\n```');
-    if (r.usage) $('#s-tokens').textContent = `${r.usage.total_tokens} (p${r.usage.prompt_tokens}/c${r.usage.completion_tokens})`;
+    const r = await (await fetch('/sop/run', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({sop_yaml:yaml})})).json();
+    sopRunId = r.run_id;
+    $('#m-provider').textContent = r.model.provider; $('#m-model').textContent = r.model.model;
+    offset = 0;
+    pollTimer = setInterval(poll, 300);
   } catch (e) { $('#s-status').textContent = '错误:'+e; }
 });
 
@@ -364,7 +386,7 @@ $('#validate-sop').addEventListener('click', async () => {
 
 async function poll() {
   let res;
-  try { res = await (await fetch((mode==='chat'?`/chat/${sessionId}`:`/task/${taskId}`) + `/events?since=${offset}`)).json(); }
+  try { res = await (await fetch((mode==='sop' ? `/sop/run/${sopRunId}` : (mode==='chat' ? `/chat/${sessionId}` : `/task/${taskId}`)) + `/events?since=${offset}`)).json(); }
   catch (e) { return; }
   for (const ev of res.events) {
     offset = res.next_offset;
@@ -388,6 +410,12 @@ async function poll() {
       $('#send-btn').disabled = false;
       const tr = ev.trace;
       if (tr && tr.usage) $('#s-tokens').textContent = `${tr.usage.total_tokens} (p${tr.usage.prompt_tokens}/c${tr.usage.completion_tokens})`;
+      if (tr && mode === 'sop') {
+        const steps = (tr.steps||[]).map(s => `step ${s.step_id}: ${s.status}, ${s.attempts} 次, ${s.turns} turns`).join('\n');
+        addMsg('assistant', `### SOP Trace — ${tr.success ? '✓ 成功' : '✗ 失败'}\n\`\`\`\n${steps}\n\`\`\``);
+        // 自动展示产物
+        setTimeout(loadArtifactsIntoMessages, 300);
+      }
       clearInterval(pollTimer); pollTimer = null;
     }
     else if (ev.type === 'error') { addMsg('assistant', '⚠️ '+ev.message); }
@@ -484,7 +512,7 @@ function addApproval(ev) {
   endTurn();
   const div = document.createElement('div'); div.className='approval';
   div.innerHTML = `<div class="reason">⚠️ 需审批: ${ev.reason}</div><pre>${JSON.stringify(ev.payload,null,2)}</pre>`;
-  const url = mode==='chat' ? `/chat/${sessionId}/approve` : `/task/${taskId}/approve`;
+  const url = mode==='sop' ? `/sop/run/${sopRunId}/approve` : (mode==='chat' ? `/chat/${sessionId}/approve` : `/task/${taskId}/approve`);
   const mk = (label, decision, cls) => { const b=document.createElement('button'); b.className=cls; b.textContent=label; b.onclick=()=>{fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:`{"decision":"${decision}"}`});div.remove();}; return b; };
   div.appendChild(mk('本次允许','once','yes'));
   div.appendChild(mk('对话允许','always','yes'));

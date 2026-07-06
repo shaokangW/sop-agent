@@ -128,16 +128,15 @@ def _wire_subagent_events(store: dict[str, Any], owner: Any) -> None:
     ctx.on_event = lambda ev: store["events"].append(_serialize_subagent_event(ev))
 
 
-def _runner(task_id: str, agent: Any) -> None:
-    store = _tasks[task_id]
-    store["agent"] = agent
-    _wire_subagent_events(store, agent)
+def _drive_owner(store: dict[str, Any], owner: Any) -> None:
+    """Drive an agent/engine event stream in a background thread, appending events to `store`."""
+    _wire_subagent_events(store, owner)
 
     def _on_token(step_id: str, delta: str) -> None:
         store["events"].append({"type": "token", "step_id": step_id, "delta": delta})
 
-    agent.on_token = _on_token
-    gen = agent.run_events()
+    owner.on_token = _on_token
+    gen = owner.run_events()
     try:
         ev = next(gen)
         while True:
@@ -187,6 +186,66 @@ def run_sop(req: RunRequest) -> dict[str, Any]:
     return trace_to_dict(trace)
 
 
+# --------------------------------------------------------------------------- async SOP run (live events)
+_sop_runs: dict[str, dict[str, Any]] = {}
+
+
+@app.post("/sop/run")
+def start_sop_run(req: RunRequest) -> dict[str, Any]:
+    """Start a SOP in the background; poll /sop/run/{id}/events for live progress."""
+    try:
+        sop = _load(req)
+    except (ValueError, yaml.YAMLError) as exc:
+        raise HTTPException(status_code=400, detail=f"invalid SOP: {exc}")
+    settings = Settings.from_env()
+    engine = get_engine(sop, settings)
+    run_id = uuid.uuid4().hex
+    store: dict[str, Any] = {
+        "engine": engine,
+        "events": [],
+        "pending": None,
+        "event": threading.Event(),
+        "decision": None,
+        "done": False,
+        "artifacts_dir": settings.artifacts_dir,
+        "sop_name": sop.metadata.name,
+    }
+    _sop_runs[run_id] = store
+    threading.Thread(target=_drive_owner, args=(store, engine), daemon=True).start()
+    lc = getattr(sop.llm_defaults, "model", "")
+    return {"run_id": run_id, "sop_name": sop.metadata.name, "model": {"provider": sop.llm_defaults.provider, "model": lc}}
+
+
+@app.get("/sop/run/{run_id}/events")
+def sop_run_events(run_id: str, since: int = Query(0)) -> dict[str, Any]:
+    store = _sop_runs.get(run_id)
+    if store is None:
+        raise HTTPException(status_code=404, detail="unknown run_id")
+    return {
+        "events": store["events"][since:],
+        "pending": store["pending"],
+        "done": store["done"],
+        "next_offset": len(store["events"]),
+        "artifacts_dir": store.get("artifacts_dir"),
+    }
+
+
+@app.post("/sop/run/{run_id}/approve")
+def sop_run_approve(run_id: str, req: ApproveRequest) -> dict[str, Any]:
+    store = _sop_runs.get(run_id)
+    if store is None:
+        raise HTTPException(status_code=404, detail="unknown run_id")
+    if req.decision not in ("approve", "once", "always", "reject"):
+        raise HTTPException(status_code=400, detail="decision must be 'once' | 'always' | 'reject'")
+    if req.decision == "always" and store.get("pending"):
+        name = (store["pending"].get("payload") or {}).get("name")
+        if name and hasattr(store["engine"], "approval_policy"):
+            store["engine"].approval_policy.approved_always.add(name)
+    store["decision"] = "reject" if req.decision == "reject" else "approve"
+    store["event"].set()
+    return {"ok": True}
+
+
 @app.post("/sop/validate")
 def validate_sop(req: RunRequest) -> dict[str, Any]:
     """Parse + structurally validate a SOP without executing it."""
@@ -219,7 +278,7 @@ def start_task(req: TaskRequest) -> dict[str, Any]:
         "decision": None,
         "done": False,
     }
-    t = threading.Thread(target=_runner, args=(task_id, agent), daemon=True)
+    t = threading.Thread(target=_drive_owner, args=(_tasks[task_id], agent), daemon=True)
     t.start()
     lc = getattr(agent, "llm_config", None)
     return {

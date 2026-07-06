@@ -1,0 +1,76 @@
+metadata:
+  name: code-survey
+  version: "1.0"
+  description: 读源文件 → 按行数走简短/详细分支 → 生成 markdown 调查报告(到 .artifacts/survey.md)。
+
+variables:
+  # 改成你想调查的文件;默认是项目里的小文件(走 brief 分支)。
+  # 想测 detailed 分支可改成 src/sopagent/server.py(行数多)。
+  file: "src/sopagent/__init__.py"
+
+llm_defaults:
+  provider: bailian
+  model: glm-5.2
+  temperature: 0.2
+
+stages:
+  - id: inspect
+    steps:
+      - id: probe
+        goal: "读取目标文件并统计行数,返回 JSON。"
+        prompt: |
+          目标文件:${file}
+
+          步骤:
+          1. 用 bash 工具运行 `wc -l < ${file}` 得到行数
+          2. 用 read_file 读该文件(offset=1, limit=5)取第一行非空内容
+          3. 返回 JSON,字段:path(=文件路径)、line_count(整数行数)、first_line(第一行非空内容)
+
+          只返回 JSON,不要额外解释。
+        tools: [bash, read_file]
+        expected_output:
+          type: object
+          properties:
+            path: {type: string}
+            line_count: {type: integer}
+            first_line: {type: string}
+          required: [path, line_count, first_line]
+        retry: {max: 1, backoff: 2.0}
+        max_turns: 8
+
+  - id: brief
+    steps:
+      - id: draft
+        goal: "生成简短调查报告(小文件,≤50 行)。"
+        prompt: |
+          基于以下探测结果写一份**简短** markdown 报告:
+          - 路径:${stages.inspect.probe.output.path}
+          - 行数:${stages.inspect.probe.output.line_count}
+          - 首行:${stages.inspect.probe.output.first_line}
+
+          要求:一个一级标题 + 三个 bullet(路径/行数/首行)+ 一句话评价。不要超过 5 行。
+        save_artifact: survey.md
+
+  - id: detailed
+    steps:
+      - id: draft
+        goal: "生成详细调查报告(大文件,>50 行)。"
+        prompt: |
+          基于以下探测结果写一份**详细** markdown 报告:
+          - 路径:${stages.inspect.probe.output.path}
+          - 行数:${stages.inspect.probe.output.line_count}
+          - 首行:${stages.inspect.probe.output.first_line}
+
+          要求:一级标题 + 概述段 + 一个 bullet 列表(路径/行数/首行/规模判断:大文件)
+          + 一个"建议关注"小节(基于行数给 2 条具体建议)。
+        save_artifact: survey.md
+
+transitions:
+  # 注意:when 表达式路径是 stages.<stage>.steps.<step>.output.field
+  # (与 prompt 里的插值 ${stages.<stage>.<step>.output.field} 不同,插值无 .steps)
+  - from: inspect
+    to: brief
+    when: "stages.inspect.steps.probe.output.line_count <= 50"
+  - from: inspect
+    to: detailed
+    when: "stages.inspect.steps.probe.output.line_count > 50"
