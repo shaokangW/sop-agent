@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 from ..llm.base import ToolCall, tool_result_message
-from .base import ToolResult
+from .base import PreExecutionHook, ToolResult, Verdict
 from .registry import ToolRegistry
 
 
 class ToolExecutor:
-    def __init__(self, registry: ToolRegistry) -> None:
+    def __init__(self, registry: ToolRegistry, pre_execution_hooks: list[PreExecutionHook] | None = None) -> None:
         self._registry = registry
+        self._hooks = pre_execution_hooks or []
 
     def batch(self, tool_calls: list[ToolCall]) -> list[ToolResult]:
         results: list[ToolResult] = []
@@ -17,6 +18,15 @@ class ToolExecutor:
         return results
 
     def _run_one(self, tc: ToolCall) -> ToolResult:
+        # pre-execution hooks (e.g. MeowWork Validator): block before running
+        for hook in self._hooks:
+            verdict: Verdict = hook.check(tc.name, tc.arguments)
+            if not verdict.allow:
+                return ToolResult(
+                    tool_call_id=tc.id,
+                    content=f"BLOCKED by validator: {verdict.reason}",
+                    ok=False,
+                )
         try:
             tool = self._registry.get(tc.name)
         except KeyError as exc:

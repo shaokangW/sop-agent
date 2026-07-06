@@ -32,6 +32,7 @@ from .tools import (
     SendMessageTool,
     UpdateStateTool,
 )
+from .validator import ValidatorHook
 
 _CHAT_ROLES = ("planner", "executor", "reviewer")
 
@@ -85,6 +86,7 @@ class GroupOrchestrator:
         max_turns: int = 30,
         max_inner: int = 8,
         tracer: Tracer | None = None,
+        validator_hook: ValidatorHook | None = None,
     ) -> None:
         self.task = task
         self.roles = roles
@@ -99,6 +101,13 @@ class GroupOrchestrator:
         self.tracer = tracer or Tracer("meowwork")
         # default router uses the planner's llm config for decisions
         self.router = router or SpeakerRouter(llm_router, roles["planner"].llm)
+        # zero-trust validator hook (auto-build unless injected/disabled)
+        if validator_hook is not None:
+            self._validator = validator_hook
+        elif "validator" in roles:
+            self._validator = ValidatorHook(llm_router, roles["validator"].llm, on_alert=self._emit)
+        else:
+            self._validator = None
 
     # -- shared mutators (called by conversation tools) -------------------
     def add_message(self, frm: str, to: str | None, content: str) -> None:
@@ -198,7 +207,7 @@ class GroupOrchestrator:
                 reg.register(t)
             except ValueError:
                 pass  # dup name (shouldn't happen)
-        executor = ToolExecutor(reg)
+        executor = ToolExecutor(reg, pre_execution_hooks=[self._validator] if self._validator else [])
         schemas = [to_openai_schema(t) for t in conv + biz]
         messages = self._build_agent_messages(role)
 
@@ -232,7 +241,7 @@ class GroupOrchestrator:
                 reg.register(t)
             except ValueError:
                 pass
-        executor = ToolExecutor(reg)
+        executor = ToolExecutor(reg, pre_execution_hooks=[self._validator] if self._validator else [])
         schemas = [to_openai_schema(t) for t in biz]
         messages: list[Message] = [
             {"role": "system", "content": role.system_prompt + "\n\n## 子任务\n" + task},

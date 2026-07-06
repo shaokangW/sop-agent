@@ -1,0 +1,42 @@
+# MeowWork Validator rules — regex blacklist for dangerous operations.
+# A rule matches when its `pattern` regex is found in the tool argument's `field`.
+# Matched → blocked immediately (no LLM call). Unmatched dangerous tools fall
+# through to the Validator LLM judge (玄猫 persona).
+
+rules:
+  - tools: [bash]
+    field: command
+    pattern: 'rm\s+-rf?\s+/(?!tmp\b)'
+    reason: 系统级递归删除(rm -rf /)
+  - tools: [bash]
+    field: command
+    pattern: ':\s*\(\)\s*\{.*:\|:&.*\};:'
+    reason: fork bomb
+  - tools: [bash]
+    field: command
+    pattern: '\bsudo\b'
+    reason: 权限提升(sudo)
+  - tools: [bash]
+    field: command
+    pattern: '\bmkfs\b|dd\s+of=/dev/|>\s*/dev/sd[a-z]'
+    reason: 磁盘/设备破坏
+  - tools: [bash]
+    field: command
+    pattern: 'cat\s+.*(\.ssh/|\.aws/|\.kube/|\.env\b)|grep.*-i.*key.*env|env\s*\|'
+    reason: 读取密钥/凭据
+  - tools: [bash]
+    field: command
+    pattern: 'chmod\s+777'
+    reason: 危险权限(chmod 777)
+  - tools: [bash]
+    field: command
+    pattern: 'crontab\s+-[er]|/etc/(passwd|shadow|sudoers)'
+    reason: 持久化/系统配置篡改
+  - tools: [bash]
+    field: command
+    pattern: '(curl|wget).*\b-d\b.*(/etc/|\.ssh/|\.env)|\bnc\b.*-l|-e\s+/bin/'
+    reason: 敏感数据外传/反弹 shell
+  - tools: [write_file, edit_file]
+    field: path
+    pattern: '^/etc/|^/var/log/|\.ssh/|\.env$|\.aws/|\.kube/'
+    reason: 写系统/敏感路径

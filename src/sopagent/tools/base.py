@@ -12,6 +12,21 @@ class ToolResult:
     ok: bool = True
 
 
+@dataclass
+class Verdict:
+    """Result of a pre-execution hook check."""
+
+    allow: bool
+    reason: str = ""
+    source: str = ""  # "rule" | "llm" | ""
+
+
+class PreExecutionHook(Protocol):
+    """Inspect a tool call before it runs; return a Verdict."""
+
+    def check(self, tool_name: str, arguments: dict[str, Any]) -> Verdict: ...
+
+
 class Tool(Protocol):
     """A callable tool exposed to the LLM."""
 

@@ -14,6 +14,7 @@ from .events import (
 from .orchestrator import GroupOrchestrator, SpeakerRouter
 from .roles import AgentRole, BUILTIN_ROLES
 from .state import GroupState
+from .validator import Rule, ValidatorHook, load_rules
 
 __all__ = [
     "AgentRole",
@@ -21,6 +22,9 @@ __all__ = [
     "GroupState",
     "GroupOrchestrator",
     "SpeakerRouter",
+    "ValidatorHook",
+    "Rule",
+    "load_rules",
     "MessageEvent",
     "StateUpdateEvent",
     "PhaseEvent",
