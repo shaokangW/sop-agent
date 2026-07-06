@@ -1,15 +1,18 @@
 "use client";
 import { motion } from "framer-motion";
+import { useEffect, useState } from "react";
 import { useMeowStore } from "@/lib/store";
 import type { SubAgentEv, ToolEv, TurnEv } from "@/lib/types";
 
 export default function ExecutorPanel() {
   const events = useMeowStore((s) => s.events);
   const state = useMeowStore((s) => s.state);
+  const [now, setNow] = useState(Date.now() / 1000);
+  useEffect(() => { const t = setInterval(() => setNow(Date.now() / 1000), 1000); return () => clearInterval(t); }, []);
   // CoT: turn events where the speaker is executor + tool calls
   const cot = events.filter((e) => e.type === "turn" && (e as TurnEv).step_id === "executor") as TurnEv[];
   const tools = events.filter((e): e is ToolEv => e.type === "tool");
-  const subs = events.filter((e): e is SubAgentEv => e.type === "subagent");
+  const subs = state?.sub_agents ?? [];
 
   return (
     <div className="flex flex-col h-full bg-panel border-b border-border">
@@ -40,17 +43,21 @@ export default function ExecutorPanel() {
       </div>
       {subs.length > 0 && (
         <div className="p-3 border-t border-border">
-          <div className="text-[10px] text-muted uppercase mb-1">子 agent (逻辑 PID)</div>
-          {subs.map((s, i) => (
-            <div key={i} className="text-xs flex items-center gap-2">
-              <span className="text-muted">#{s.pid}</span>
-              <span className="text-executor">{s.role}</span>
-              <span className="text-text flex-1 truncate">{s.task}</span>
-              <span className={s.status === "done" ? "text-executor" : s.status === "running" ? "text-planner animate-pulse-slow" : "text-danger"}>
-                {s.status}
-              </span>
-            </div>
-          ))}
+          <div className="text-[10px] text-muted uppercase mb-1">子 agent (逻辑 PID · 健康度)</div>
+          {subs.map((s, i) => {
+            const elapsed = s.status === "running" && s.started_at ? now - s.started_at : s.duration;
+            return (
+              <div key={i} className="text-xs flex items-center gap-2">
+                <span className="text-muted">#{s.pid}</span>
+                <span className="text-executor">{s.role}</span>
+                <span className="text-text flex-1 truncate">{s.task}</span>
+                <span className="text-muted">{elapsed != null ? `${elapsed.toFixed(1)}s` : ""}</span>
+                <span className={s.status === "done" ? "text-executor" : s.status === "running" ? "text-planner animate-pulse-slow" : "text-danger"}>
+                  {s.status}
+                </span>
+              </div>
+            );
+          })}
         </div>
       )}
       {state?.current_artifact && (

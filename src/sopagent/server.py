@@ -301,7 +301,26 @@ def meowwork_run_events(run_id: str, since: int = Query(0)) -> dict[str, Any]:
         "done": store["done"],
         "next_offset": len(store["events"]),
         "state": store["orch"].state.to_dict(),
+        "paused": store["orch"].is_paused,
     }
+
+
+class PauseRequest(BaseModel):
+    paused: bool
+
+
+@app.post("/meowwork/run/{run_id}/pause")
+def meowwork_pause(run_id: str, req: PauseRequest) -> dict[str, Any]:
+    """Catnip: freeze (paused=true) or resume (paused=false) the collaboration loop."""
+    store = _meowwork_runs.get(run_id)
+    if store is None:
+        raise HTTPException(status_code=404, detail="unknown run_id")
+    orch = store["orch"]
+    if req.paused:
+        orch.pause()
+    else:
+        orch.resume()
+    return {"ok": True, "paused": orch.is_paused}
 
 
 @app.websocket("/ws/meowwork/{run_id}")

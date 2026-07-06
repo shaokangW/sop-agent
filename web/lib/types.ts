@@ -23,7 +23,7 @@ export interface MeowState {
   review_feedback: string | null;
   review_pass: boolean | null;
   security_alerts: Array<Record<string, unknown>>;
-  sub_agents: Array<{ pid: number; role: string; task: string; status: string }>;
+  sub_agents: Array<{ pid: number; role: string; task: string; status: string; started_at?: number; duration?: number }>;
   turn: number;
   finished: boolean;
   summary: string | null;

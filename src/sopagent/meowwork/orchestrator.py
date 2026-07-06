@@ -13,6 +13,8 @@ Reuses sop-agent's LLMRouter / ToolRegistry / ToolExecutor / event stream.
 from __future__ import annotations
 
 import json
+import threading
+import time
 from typing import Any, Callable, Iterator
 
 from ..harness.events import DoneEvent, TurnEvent
@@ -99,6 +101,8 @@ class GroupOrchestrator:
         self.max_turns = max_turns
         self.max_inner = max_inner
         self.tracer = tracer or Tracer("meowwork")
+        # catnip: global pause (set → freeze between turns, resume on clear)
+        self._pause_event = threading.Event()
         # default router uses the planner's llm config for decisions
         self.router = router or SpeakerRouter(llm_router, roles["planner"].llm)
         # zero-trust validator hook (auto-build unless injected/disabled)
@@ -129,18 +133,20 @@ class GroupOrchestrator:
             return f"ERROR: 未知角色 '{role_name}'"
         self._pid_counter += 1
         pid = self._pid_counter
-        self.state.sub_agents.append({"pid": pid, "role": role_name, "task": task, "status": "running"})
+        self.state.sub_agents.append({"pid": pid, "role": role_name, "task": task, "status": "running", "started_at": time.time()})
         self._emit(SubAgentEvent(pid=pid, role=role_name, task=task, status="running"))
         try:
             result = self._run_subagent(role_name, task)
         except Exception as exc:  # noqa: BLE001
             result = f"ERROR: 子 agent 失败: {exc!r}"
             self.state.sub_agents[-1]["status"] = "failed"
+            self.state.sub_agents[-1]["duration"] = time.time() - self.state.sub_agents[-1]["started_at"]
             self._emit(SubAgentEvent(pid=pid, role=role_name, task=task, status="failed"))
             return result
         for sa in self.state.sub_agents:
             if sa["pid"] == pid:
                 sa["status"] = "done"
+                sa["duration"] = time.time() - sa["started_at"]
         self._emit(SubAgentEvent(pid=pid, role=role_name, task=task, status="done"))
         return result
 
@@ -279,6 +285,9 @@ class GroupOrchestrator:
         if speaker not in _CHAT_ROLES:
             speaker = "planner"
         while not self.state.finished and self.state.turn < self.max_turns:
+            # catnip global pause: block here (background thread) while paused
+            while self._pause_event.is_set():
+                self._pause_event.wait(timeout=0.5)
             turn_start_idx = len(self.messages)
             yield from self._run_agent_turn(self.roles[speaker])
             self.state.turn += 1
@@ -289,3 +298,14 @@ class GroupOrchestrator:
                 speaker = "planner"
         success = self.state.finished
         yield DoneEvent(self.tracer.finalize(success))
+
+    # -- catnip pause control --------------------------------------------
+    def pause(self) -> None:
+        self._pause_event.set()
+
+    def resume(self) -> None:
+        self._pause_event.clear()
+
+    @property
+    def is_paused(self) -> bool:
+        return self._pause_event.is_set()

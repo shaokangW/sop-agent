@@ -26,6 +26,7 @@ class _FakeOrch:
     def __init__(self) -> None:
         self.state = _FakeState()
         self.roles = {"planner": _FakeRole(), "executor": _FakeRole(), "reviewer": _FakeRole(), "validator": _FakeRole()}
+        self.is_paused = False
 
     def run_events(self):
         yield MessageEvent(frm="planner", to="executor", content="go")
