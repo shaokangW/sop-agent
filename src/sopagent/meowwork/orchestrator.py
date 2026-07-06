@@ -17,7 +17,7 @@ import threading
 import time
 from typing import Any, Callable, Iterator
 
-from ..harness.events import DoneEvent, TurnEvent
+from ..harness.events import DoneEvent, ToolExecutedEvent, TurnEvent
 from ..harness.tracer import Tracer
 from ..llm.base import Message, tool_result_message
 from ..llm.router import LLMRouter
@@ -52,29 +52,34 @@ class SpeakerRouter:
         self._llm_config = llm_config
         self._decide = decide  # injectable for tests
 
-    def next(self, state: GroupState, messages: list[Message]) -> str:
+    def next(self, state: GroupState, messages: list[Message]) -> str | None:
         if self._decide is not None:
             return self._decide(state, messages)
-        return self._llm_decide(state, messages)
+        return self._llm_route(state, messages)
 
-    def _llm_decide(self, state: GroupState, messages: list[Message]) -> str:
+    def _llm_route(self, state: GroupState, messages: list[Message]) -> str | None:
+        """LLM decides who speaks next, or None if the discussion is naturally done."""
         recent = "\n".join(f"[{m.get('name','?')}→{m.get('to') or 'all'}]: {(m.get('content') or '')[:80]}" for m in messages[-6:])
         prompt = (
             f"任务:{state.task}\n当前阶段:{state.phase}\n轮次:{state.turn}\n\n最近讨论:\n{recent}\n\n"
-            f"下一发言者应是 planner/executor/reviewer 中的哪一位?只输出角色名(一个词)。"
+            f"下一发言者应是 planner/executor/reviewer/validator 中的哪一位?"
+            f"如果当前讨论已自然结束(无人需要再发言,或任务已完成),输出 none。"
+            f"只输出一个词(角色名或 none)。"
         )
         try:
             resp = self._router.chat(
-                [{"role": "system", "content": "你决定多智能体讨论的下一发言者。只输出角色名。"},
+                [{"role": "system", "content": "你决定多智能体讨论的下一发言者,或判断讨论是否结束。只输出角色名或 none。"},
                  {"role": "user", "content": prompt}],
                 [], self._llm_config,
             )
             name = (resp.content or "").strip().lower()
+            if name == "none":
+                return None
             if name in _CHAT_ROLES:
                 return name
         except Exception:
             pass
-        return "planner"  # safe fallback
+        return "planner"  # safe fallback (don't terminate unexpectedly on LLM error)
 
 
 class GroupOrchestrator:
@@ -85,10 +90,11 @@ class GroupOrchestrator:
         llm_router: LLMRouter,
         business_registry: ToolRegistry,
         router: SpeakerRouter | None = None,
-        max_turns: int = 30,
+        max_turns: int = 8,
         max_inner: int = 8,
         tracer: Tracer | None = None,
         validator_hook: ValidatorHook | None = None,
+        max_turns_per_send: int = 4,
     ) -> None:
         self.task = task
         self.roles = roles
@@ -100,7 +106,10 @@ class GroupOrchestrator:
         self._pid_counter = 0
         self.max_turns = max_turns
         self.max_inner = max_inner
+        self.max_turns_per_send = max_turns_per_send
         self.tracer = tracer or Tracer("meowwork")
+        # token streaming sink (set by _drive_owner in server mode); None in tests
+        self.on_token: Callable[[str, str], None] | None = None
         # catnip: global pause (set → freeze between turns, resume on clear)
         self._pause_event = threading.Event()
         # default router uses the planner's llm config for decisions
@@ -218,7 +227,15 @@ class GroupOrchestrator:
         messages = self._build_agent_messages(role)
 
         for inner in range(self.max_inner):
-            resp = self.llm_router.chat(messages, schemas, role.llm)
+            # stream tokens live when an on_token sink is wired (e.g. by _drive_owner);
+            # fall back to non-streaming chat in tests where on_token is None
+            if self.on_token is not None:
+                resp = self.llm_router.chat_stream(
+                    messages, schemas, role.llm,
+                    on_delta=lambda d: self.on_token(role.name, d),
+                )
+            else:
+                resp = self.llm_router.chat(messages, schemas, role.llm)
             tc_dicts = [{"id": getattr(tc, "id", ""), "function": {"name": tc.name, "arguments": tc.arguments}} for tc in resp.tool_calls]
             self.tracer.turn(role.name, self.state.turn, "assistant", resp.content, tc_dicts)
             yield TurnEvent(role.name, self.state.turn, resp.content, tc_dicts)
@@ -232,6 +249,8 @@ class GroupOrchestrator:
             for tc in resp.tool_calls:
                 results = executor.batch([tc])
                 r = results[0]
+                yield ToolExecutedEvent(role.name, tc.id, tc.name, r.ok, r.content)
+                self.tracer.turn(role.name, self.state.turn, "tool", r.content)
                 messages.append(tool_result_message(tc.id, r.content))
             yield from self._drain()
         # max_inner reached without a final reply
@@ -264,10 +283,10 @@ class GroupOrchestrator:
         return "(子 agent 达到最大轮次)"
 
     # -- next speaker: autonomous hand-off (this turn) then router fallback ----
-    def _next_speaker(self, just_spoke: str | None, turn_start_idx: int) -> str:
-        # hand-off: a directed send_message(to=X) sent by `just_spoke` during the
-        # turn that just ended (messages[turn_start_idx:]) picks X next.
+    def _next_speaker(self, just_spoke: str | None, turn_start_idx: int) -> str | None:
+        """Return the next speaker, or None if no one wants to speak (natural end)."""
         if just_spoke is not None:
+            # hand-off: a directed send_message(to=X) sent by `just_spoke` this turn
             for m in self.messages[turn_start_idx:]:
                 if m.get("name") == just_spoke and m.get("to") in _CHAT_ROLES:
                     return m["to"]
@@ -276,7 +295,16 @@ class GroupOrchestrator:
             for m in reversed(self.messages):
                 if m.get("to") in _CHAT_ROLES:
                     return m["to"]
+        # LLM route: may return None (no one wants to speak → terminate)
         return self.router.next(self.state, self.messages)
+
+    def _parse_mention(self, text: str) -> str | None:
+        """Parse @executor / @reviewer / @planner from a user message."""
+        low = (text or "").lower()
+        for role in self.roles:
+            if f"@{role}" in low:
+                return role
+        return None
 
     # -- main loop --------------------------------------------------------
     def run_events(self) -> Iterator[Any]:
@@ -294,10 +322,43 @@ class GroupOrchestrator:
             if self.state.finished:
                 break
             speaker = self._next_speaker(speaker, turn_start_idx)
-            if speaker not in _CHAT_ROLES:
-                speaker = "planner"
+            if speaker is None or speaker not in _CHAT_ROLES:
+                break  # no one wants to speak → terminate
         success = self.state.finished
         yield DoneEvent(self.tracer.finalize(success))
+
+    # -- task mode: user sends a requirement, cats collaborate to completion --
+    def run_task(self, user_message: str) -> Iterator[Any]:
+        """Append the user's requirement to the shared history, let the four cats
+        collaborate until ``finish_task`` (or ``max_turns``), then return control.
+
+        History (``self.messages``) is preserved across tasks, so the group has
+        memory: the next ``run_task`` sees prior turns + artifacts.
+        """
+        self.messages.append({"role": "user", "name": "user", "content": user_message, "to": None})
+        self.state.finished = False
+        self.state.summary = None
+        # @mention routing: user can direct with @executor / @reviewer / @planner;
+        # otherwise planner responds first
+        speaker = self._parse_mention(user_message) or "planner"
+        turns_this_task = 0
+        while not self.state.finished and turns_this_task < self.max_turns:
+            while self._pause_event.is_set():
+                self._pause_event.wait(timeout=0.5)
+            turn_start_idx = len(self.messages)
+            yield from self._run_agent_turn(self.roles[speaker])
+            self.state.turn += 1
+            turns_this_task += 1
+            if self.state.finished:
+                break
+            # intelligent termination: router returns None = no one wants to speak
+            nxt = self._next_speaker(speaker, turn_start_idx)
+            if nxt is None:
+                self.state.finished = True
+                self.state.summary = "(讨论自然结束)"
+                break
+            speaker = nxt
+        yield DoneEvent(self.tracer.finalize(self.state.finished))
 
     # -- catnip pause control --------------------------------------------
     def pause(self) -> None:

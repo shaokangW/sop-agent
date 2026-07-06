@@ -125,3 +125,22 @@ class FinishTaskTool:
             return "ERROR: 只有 planner 能 finish_task"
         self._orch.state_update("summary", summary, self._by)
         return f"任务完成: {summary[:120]}"
+
+
+class EndTurnTool:
+    name = "end_turn"
+    description = (
+        "结束本回合讨论,把控制权交还用户(用户可继续发消息推进)。"
+        "当你(总管)判断:本轮讨论已告一段落、或等待用户确认/补充信息、"
+        "或当前子任务已分派完毕无需继续时,调用此工具结束本轮。"
+        "注意:整个任务真正完成才用 finish_task;只是本轮够了用 end_turn。"
+    )
+    parameters = {"type": "object", "properties": {}}
+
+    def __init__(self, orch: Any, by: str) -> None:
+        self._orch = orch
+        self._by = by
+
+    def run(self, args: dict[str, Any]) -> str:
+        self._orch.end_turn()
+        return "本回合结束,交还用户"

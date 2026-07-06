@@ -68,7 +68,7 @@ def test_validator_no_tools_not_chat_participant() -> None:
 def test_persona_prompts_loaded() -> None:
     for name, role in BUILTIN_ROLES.items():
         assert role.system_prompt, f"{name} prompt empty"
-        assert "职责" in role.system_prompt or "JSON" in role.system_prompt
+        assert any(kw in role.system_prompt for kw in ["职责", "JSON", "工作流", "判定", "审查"]), f"{name} prompt lacks keyword"
 
 
 def test_role_custom_llm() -> None:

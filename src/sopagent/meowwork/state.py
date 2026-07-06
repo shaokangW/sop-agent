@@ -68,3 +68,18 @@ class GroupState:
             "finished": self.finished,
             "summary": self.summary,
         }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "GroupState":
+        s = cls(task=d.get("task", ""))
+        s.phase = d.get("phase", "analyze")
+        s.plan_tree = d.get("plan_tree", {})
+        s.current_artifact = d.get("current_artifact")
+        s.review_feedback = d.get("review_feedback")
+        s.review_pass = d.get("review_pass")
+        s.security_alerts = list(d.get("security_alerts", []))
+        s.sub_agents = list(d.get("sub_agents", []))
+        s.turn = d.get("turn", 0)
+        s.finished = d.get("finished", False)
+        s.summary = d.get("summary")
+        return s

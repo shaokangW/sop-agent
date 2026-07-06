@@ -45,12 +45,14 @@ from .meowwork.events import (
     StateUpdateEvent,
     SubAgentEvent,
 )
+from .meowwork.group_store import GroupStore
 from .sop.loader import load_sop, load_sop_from_text
 from .sop.schema import SOP
 
 app = FastAPI(title="sop-agent", version="0.1.0")
 
 _session_store = SessionStore()
+_group_store = GroupStore()
 
 
 # --------------------------------------------------------------------------- models
@@ -343,6 +345,142 @@ async def ws_meowwork(ws: WebSocket, run_id: str) -> None:
             if store["done"] and not evs:
                 await ws.send_json({"type": "final_state", "state": store["orch"].state.to_dict()})
                 break
+            await asyncio.sleep(0.1)
+    except WebSocketDisconnect:
+        pass
+    await ws.close()
+
+
+# --------------------------------------------------------------------------- meowwork group chat (persistent, multi-send)
+class GroupCreateRequest(BaseModel):
+    task: str = "群组协作"
+    provider: str | None = None
+    model: str | None = None
+
+
+class GroupSendRequest(BaseModel):
+    message: str
+
+
+_meowwork_groups: dict[str, dict[str, Any]] = {}
+
+
+def _get_or_create_group(gid: str, settings: Settings) -> dict[str, Any] | None:
+    """Load a group's store from memory, or rebuild from disk (cross-restart)."""
+    st = _meowwork_groups.get(gid)
+    if st is not None:
+        return st
+    rec = _group_store.load(gid)
+    if rec is None:
+        return None
+    orch = build_orchestrator(rec.get("state", {}).get("task") or rec.get("title") or "群组协作", settings)
+    orch.messages = list(rec.get("messages") or [])
+    if rec.get("state"):
+        orch.state = __import__("sopagent.meowwork.state", fromlist=["GroupState"]).GroupState.from_dict(rec["state"])
+    st = {"orch": orch, "events": [], "running": False, "gid": gid, "title": rec.get("title", "新群组")}
+    _meowwork_groups[gid] = st
+    return st
+
+
+def _drive_group_send(store: dict[str, Any], user_message: str) -> None:
+    """Run one task to completion (orch.run_task) in a background thread."""
+    orch = store["orch"]
+    _wire_subagent_events(store, orch)
+    orch.on_token = lambda sid, d: store["events"].append({"type": "token", "step_id": sid, "delta": d})
+    gen = orch.run_task(user_message)
+    try:
+        for ev in gen:
+            store["events"].append(_serialize_event(ev))
+    except Exception as exc:  # noqa: BLE001
+        store["events"].append({"type": "error", "message": str(exc)})
+    store["events"].append({"type": "round_done", "state": orch.state.to_dict()})
+    store["running"] = False
+    try:
+        _group_store.save(store["gid"], orch.messages, orch.state.to_dict(), title=store.get("title"))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+@app.post("/meowwork/group")
+def create_group(req: GroupCreateRequest) -> dict[str, Any]:
+    settings = Settings.from_env()
+    gid = _group_store.create(title=req.task[:30] or "新群组")
+    orch = build_orchestrator(req.task, settings, provider=req.provider, model=req.model)
+    _meowwork_groups[gid] = {"orch": orch, "events": [], "running": False, "gid": gid, "title": req.task[:30] or "新群组"}
+    _group_store.save(gid, [], orch.state.to_dict(), title=req.task[:30] or "新群组")
+    lc = orch.roles["planner"].llm
+    return {"group_id": gid, "title": req.task[:30] or "新群组", "model": {"provider": lc.provider, "model": lc.model}}
+
+
+@app.post("/meowwork/group/{gid}/send")
+def group_send(gid: str, req: GroupSendRequest) -> dict[str, Any]:
+    settings = Settings.from_env()
+    st = _get_or_create_group(gid, settings)
+    if st is None:
+        raise HTTPException(status_code=404, detail="unknown group_id")
+    if st["running"]:
+        raise HTTPException(status_code=409, detail="group is still running a task; wait for completion")
+    st["running"] = True
+    threading.Thread(target=_drive_group_send, args=(st, req.message), daemon=True).start()
+    return {"ok": True}
+
+
+@app.get("/meowwork/group/{gid}/history")
+def group_history(gid: str) -> dict[str, Any]:
+    settings = Settings.from_env()
+    st = _meowwork_groups.get(gid)
+    if st is not None:
+        msgs = st["orch"].messages
+        state = st["orch"].state.to_dict()
+    else:
+        rec = _group_store.load(gid)
+        if rec is None:
+            raise HTTPException(status_code=404, detail="unknown group_id")
+        msgs = rec.get("messages", [])
+        state = rec.get("state")
+    # format messages for the client: role/name/content/to
+    out = [{"role": m.get("name") or m.get("role", "?"), "content": m.get("content", ""), "to": m.get("to")} for m in msgs]
+    return {"messages": out, "state": state}
+
+
+@app.get("/meowwork/group/{gid}/events")
+def group_events(gid: str, since: int = Query(0)) -> dict[str, Any]:
+    st = _meowwork_groups.get(gid)
+    if st is None:
+        raise HTTPException(status_code=404, detail="unknown group_id")
+    return {"events": st["events"][since:], "running": st["running"], "next_offset": len(st["events"]), "state": st["orch"].state.to_dict()}
+
+
+@app.get("/meowwork/groups")
+def list_groups() -> list[dict[str, Any]]:
+    return _group_store.list_groups()
+
+
+@app.delete("/meowwork/group/{gid}")
+def delete_group(gid: str) -> dict[str, Any]:
+    _meowwork_groups.pop(gid, None)
+    if not _group_store.delete(gid):
+        raise HTTPException(status_code=404, detail="unknown group_id")
+    return {"ok": True}
+
+
+@app.websocket("/ws/meowwork/group/{gid}")
+async def ws_group(ws: WebSocket, gid: str) -> None:
+    """Persistent group WS: streams events across multiple sends (no break on round_done)."""
+    st = _meowwork_groups.get(gid)
+    if st is None:
+        await ws.accept()
+        await ws.send_json({"type": "error", "message": "unknown group_id"})
+        await ws.close()
+        return
+    await ws.accept()
+    offset = 0
+    try:
+        while True:
+            evs = st["events"][offset:]
+            offset = len(st["events"])
+            for ev in evs:
+                await ws.send_json(ev)
             await asyncio.sleep(0.1)
     except WebSocketDisconnect:
         pass
