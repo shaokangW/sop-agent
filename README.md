@@ -4,6 +4,8 @@
 
 默认接入**百炼 GLM-5.2**（OpenAI 兼容），凭证自动从本地 opencode 配置读取，开箱即用。
 
+> **MeowWork(喵工坊)**:基于 sop-agent 内核的多智能体协作与监控系统——四只猫咪 Agent(布偶总管/橘猫执行/狸花审查/玄猫安全)在共享讨论信道自主交流、分配任务、推进;玄猫零信任拦截层(规则+LLM 判定);WebSocket 实时推送;Next.js 赛博喵工坊看板。详见 [MEOWWORK_DESIGN.md](MEOWWORK_DESIGN.md)。
+
 ## 架构
 
 ### 两层嵌套循环（核心）
@@ -20,14 +22,17 @@
 ### 分层
 
 ```
-运行层      cli.py (chat/task/run/traces)  |  server.py (FastAPI + Web UI)
+运行层      cli.py (chat/task/run/traces)  |  server.py (FastAPI + Web UI + WebSocket)
 harness     engine / autonomous / interactive / approval / events / transitions / tui / markdown_render / context_window / session_store
 LLM 抽象    base(Protocol) / openai_provider / anthropic_provider / registry / router  (多 provider + 流式 + reasoning + usage)
-工具层      base / registry / executor / builtin(10 工具 + task 委派) / mcp_client
+工具层      base(Verdict+PreExecutionHook) / registry / executor(支持 hook) / builtin(10 工具 + task 委派) / mcp_client
 SOP 模型    schema(Pydantic) / loader(YAML 解析 + 变量插值)
 配置        config.py (env + opencode.json 读取百炼凭证 + 全局 MCP 配置 + anthropic/ollama provider)
 Prompt      prompt_builder.py (openclaw 风格: 分层文档 + mode 门控 + cache boundary)
+Skill       skills/ (SKILL.md 分层发现 + SkillTool 按需加载)
+MeowWork    meowwork/ (GroupChat 协作层:四猫角色 + GroupOrchestrator + Validator 零信任 + WebSocket)
 自研 TUI    tui/ (OpenTUI 移植: buffer/cell-grid diff / renderable+flexbox / widgets+stickyScroll)
+前端        web/ (Next.js 赛博喵工坊四工作台看板)
 ```
 
 ### 事件流执行器
@@ -68,6 +73,21 @@ dynamic suffix（每轮变化）     autonomous: Plan+子目标 / sop: step goal
 - **Web UI**：消息分块（user/assistant 配色）+ markdown 渲染 + 思考块 + 工具调用两级折叠 + 侧边栏（模型/使用情况/工具汇总/已加载工具/MCP 服务）+ session 管理（新建/历史/继续/删除）+ 三模式切换 + 审批三选项 + 产物浏览器（`/artifacts` 列表+预览）+ trace 时间线（`/traces` 回放）+ SOP YAML 在线校验 + token 用量侧栏
 - **TUI**：prompt_toolkit + 自研 ScrollBox（stickyScroll 1:1 移植自 OpenTUI：自动跟随/上翻脱粘/回底重粘）
 - **自研 TUI 框架**：`tui/`（OpenTUI Python 移植：CellGrid 行 diff / Renderable+flexbox / ScrollBox stickyScroll 状态机）
+
+## MeowWork 多智能体协作
+
+四只猫咪 Agent 在共享讨论信道自主协作(基于 sop-agent 内核的 GroupChat 层):
+
+- **Planner 布偶猫(总管)**:唯一入口,任务拆解为子任务树,推进 phase(analyze→execute→review→validate→done),路由分发,不写代码只调度
+- **Executor 橘猫(执行者)**:接任务写代码/调工具,大任务可 `delegate` 拉起子 agent(逻辑 PID),产出 artifact
+- **Reviewer 狸花猫(审查)**:静态分析/读代码/跑测试,pass 推进 / fail 打回(Executor↔Reviewer 循环)
+- **Validator 玄猫(零信任网关)**:工具执行前 hook,规则黑名单预筛 + LLM persona 判定危险,拦截 `rm -rf`/密钥/sudo/反弹shell 等,`SecurityAlertEvent` + "BLOCKED by validator"
+
+**协作机制**:共享讨论历史(全猫可见)+ 自主交棒(`send_message(to=X)` 定向,轮内消费)+ Planner LLM 兜底路由 + phase 框架(阶段内自由讨论)。`update_state` 按字段权限矩阵(planner 管 phase/plan_tree;executor 管 current_artifact;reviewer 管 review_*)。
+
+**实时**:事件流(`MessageEvent`/`StateUpdateEvent`/`PhaseEvent`/`SubAgentEvent`/`SecurityAlertEvent`)经 `POST /meowwork/run` 启动 + `GET /meowwork/run/{id}/events` 轮询 + `WS /ws/meowwork/{id}` 实时广播 + final_state 快照。
+
+**前端**:Next.js 赛博喵工坊四工作台(左布偶任务树+讨论 / 中上橘猫 CoT+子agent / 中下狸花审查 / 右玄猫安全瀑布,拦截炸毛+ACCESS DENIED)。
 
 ## 安装
 
@@ -148,6 +168,22 @@ CLI `task`/`run` 默认实时打印工具调用（`▸ tool ok: 预览`），`ta
 
 **Skill**:在 `~/.sop-agent/skills/<name>/SKILL.md` 或项目 `skills/<name>/SKILL.md` 放自定义工作流,agent 任务匹配时自主调 `skill` 工具加载(内置 `debug-test`/`code-review` 示例见 `src/sopagent/skills/`)。
 
+### MeowWork 多智能体协作
+
+```powershell
+# 后端(FastAPI + WebSocket)
+$env:PYTHONPATH="src"
+python -m uvicorn sopagent.server:app --port 8000
+
+# 前端(Next.js 赛博喵工坊看板)
+cd web
+npm install
+npm run dev
+# 浏览器打开 http://localhost:3000,输入任务 → 启动协作 → 四工作台实时看
+```
+
+也可直接 HTTP:`POST /meowwork/run` `{task}` → `run_id`,订阅 `WS /ws/meowwork/{run_id}` 收事件流。
+
 ### 写自己的 SOP
 
 ```yaml
@@ -183,9 +219,11 @@ src/sopagent/
 ├── tools/                  工具层（builtin 10 工具含 task 委派 + skill 技能 + MCP + executor）
 ├── harness/                引擎（engine/autonomous/interactive/approval/events/transitions/tui/markdown_render/context_window/session_store/tracer）
 ├── skills/                 Skill 技能包（registry + 内置 debug-test/code-review SKILL.md）
+├── meowwork/               MeowWork 多智能体协作（GroupState/AgentRole/GroupOrchestrator/Validator/builder + 四猫 persona）
 └── tui/                    自研 TUI 框架（OpenTUI 移植：buffer/renderable/widgets）
-sops/                       SOP 示例（research.yaml + mcp_test.yaml）
-tests/                      测试（131，覆盖 ... + 6 项新能力 + skill）
+sops/                       SOP 示例（research.yaml + mcp_test.yaml + code-survey.yaml）
+web/                        Next.js 前端（赛博喵工坊四工作台看板）
+tests/                      测试（159，覆盖 ... + 6 项新能力 + skill + MeowWork Phase0-3）
 ```
 
 ## 测试

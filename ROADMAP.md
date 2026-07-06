@@ -90,6 +90,51 @@ trace 落盘 + token 统计 + 回放。
 
 ---
 
+## #8 MeowWork 多智能体协作 [high] — Phase 0-4 完成
+
+基于 sop-agent 内核的四猫(Planner/Executor/Reviewer/Validator)协作系统。决策:自研 transitions(不引 LangGraph)、Next.js 前端、逻辑 PID、Validator 用 LLM 判定、全做;协作=LLM 路由兜底+自主交棒优先+共享讨论历史+Planner 阶段框架。设计文档 [MEOWWORK_DESIGN.md](MEOWWORK_DESIGN.md)。
+
+### Phase 0 ✅ 脚手架(已推送)
+- `MEOWWORK_DESIGN.md`(11 节详细设计)+ `meowwork/` 包
+- `state.py` GroupState(单事实来源,字段权限矩阵 FIELD_OWNERS,to_dict 供 WS)
+- `roles.py` AgentRole + BUILTIN_ROLES(四猫:工具白名单+权限+persona)
+- `prompts/{planner,executor,reviewer,validator}.md` 四猫 persona
+
+### Phase 1 ✅ GroupChat 内核(已推送)
+- `events.py` 5 新事件(MessageEvent/StateUpdateEvent/PhaseEvent/SubAgentEvent/SecurityAlertEvent)
+- `tools.py` 5 对话工具(contextual:send_message/broadcast/update_state/delegate/finish_task)
+- `orchestrator.py` GroupOrchestrator(对话循环+内层 tool_calls+共享讨论+全局 state)+ SpeakerRouter
+  * 自主交棒:仅看当前轮 directed send_message(to=X),轮结束消费(避免重复选);无交棒→LLM 兜底
+  * delegate:逻辑 PID + SubAgentEvent,子 agent 全新 context 只业务工具
+  * phase 推进:planner update_state(phase=...) 触发 PhaseEvent
+
+### Phase 2 ✅ Validator 零信任拦截(已推送)
+- `tools/base.py` Verdict + PreExecutionHook protocol
+- `tools/executor.py` pre_execution_hooks 入口,拦截返 BLOCKED 不执行
+- `meowwork/validator.py` ValidatorHook(规则预筛+玄猫 LLM 判定,fail-open)+ `validator_rules.yaml` 黑名单
+- orchestrator 自动构建 hook,on_alert 绑 _emit;agent+子agent executor 都挂
+
+### Phase 3 ✅ WebSocket(已推送)
+- `meowwork/builder.py` build_orchestrator(四猫+业务工具+provider 覆盖)
+- `server.py`:`_serialize_event` 扩展 5 meowwork 事件;`POST /meowwork/run` + `GET /meowwork/run/{id}/events` + `WS /ws/meowwork/{id}`(逐事件+final_state)
+
+### Phase 4 ✅ Next.js 前端(本地提交,push 待网络)
+- `web/` Next.js 14 App Router + Tailwind(四猫配色)+ Zustand + Framer Motion
+- `lib/`(types/store/ws/api)+ 四工作台组件(PlannerPanel/ExecutorPanel/ReviewerPanel/ValidatorPanel)+ TaskInput/StatusBar
+- 四工作台:左布偶(阶段推进+任务树🐾●○+讨论日志)/中上橘(CoT+工具+子agent PID+产出)/中下狸(通过/打回+反馈+计数)/右玄(黑底矩阵绿瀑布,拦截炸毛+ACCESS DENIED)
+- 顶部 TaskInput 启动协作 + StatusBar(连接/phase/轮次/猫薄荷 Pause)
+- 验证:npm install + next build 编译通过(route / 42.9 kB)
+
+### Phase 5 待开(打磨)
+- 猫薄荷 Global Pause 实际冻结逻辑(目前仅 UI 按钮)
+- 子 agent 健康度展示
+- 真实任务("分析漏洞+写修复脚本")端到端验证
+- persona prompt 细化
+
+测试:159(Phase 0-3 各 +8/+6/+10/+4),全过。
+
+---
+
 ## 交互层:用户可感知可操作 [完成]
 
 6 项能力建成后,补齐各能力的用户交互入口。**117 测试 + 真实 LLM(百炼 GLM-5.2)e2e 验证通过**。
