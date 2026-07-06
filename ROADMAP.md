@@ -125,13 +125,13 @@ trace 落盘 + token 统计 + 回放。
 - 顶部 TaskInput 启动协作 + StatusBar(连接/phase/轮次/猫薄荷 Pause)
 - 验证:npm install + next build 编译通过(route / 42.9 kB)
 
-### Phase 5 待开(打磨)
-- 猫薄荷 Global Pause 实际冻结逻辑(目前仅 UI 按钮)
-- 子 agent 健康度展示
-- 真实任务("分析漏洞+写修复脚本")端到端验证
-- persona prompt 细化
+### Phase 5 ✅ 打磨(已推送)
+- 猫薄荷 Global Pause 实际冻结:orchestrator `_pause_event` + `pause/resume/is_paused`,run_events 每轮检查阻塞;`POST /meowwork/run/{id}/pause` 端点;GET events 带 `paused`;前端 StatusBar 按钮调后端(冻结时 animate-pulse)
+- 子 agent 健康度:delegate 记录 `started_at`/`duration`;前端 ExecutorPanel 1s tick 展示 elapsed(运行中实时 / 完成显示 duration)
+- 真实 e2e 验证(百炼 GLM-5.2):四猫协作跑通——planner delegate executor 子 agent 读文件 → send_message(to=reviewer) 转审查 → broadcast 等待;事件流 message/subagent/phase/state_update/turn 实时可见
+- 测试 2:pause 冻结→恢复后完成 / 子 agent started_at+duration;全量 161 过
 
-测试:159(Phase 0-3 各 +8/+6/+10/+4),全过。
+测试:161(Phase 0-3 各 +8/+6/+10/+4,Phase 5 +2),全过。MeowWork 全 5 阶段完成。
 
 ---
 
