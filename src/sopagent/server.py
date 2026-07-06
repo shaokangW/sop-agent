@@ -12,6 +12,7 @@ Endpoints:
 """
 from __future__ import annotations
 
+import asyncio
 import threading
 import uuid
 from dataclasses import asdict
@@ -20,7 +21,7 @@ from time import time
 from typing import Any
 
 import yaml
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
@@ -36,6 +37,14 @@ from .harness import (
     TurnEvent,
 )
 from .harness.session_store import SessionStore
+from .meowwork.builder import build_orchestrator
+from .meowwork.events import (
+    MessageEvent,
+    PhaseEvent,
+    SecurityAlertEvent,
+    StateUpdateEvent,
+    SubAgentEvent,
+)
 from .sop.loader import load_sop, load_sop_from_text
 from .sop.schema import SOP
 
@@ -91,6 +100,18 @@ _tasks: dict[str, dict[str, Any]] = {}
 
 
 def _serialize_event(ev: Any) -> dict[str, Any]:
+    # MeowWork collaboration events
+    if isinstance(ev, MessageEvent):
+        return {"type": "message", "from": ev.frm, "to": ev.to, "content": ev.content}
+    if isinstance(ev, StateUpdateEvent):
+        return {"type": "state_update", "key": ev.key, "old": ev.old, "new": ev.new, "by": ev.by}
+    if isinstance(ev, PhaseEvent):
+        return {"type": "phase", "from": ev.from_phase, "to": ev.to_phase, "by": ev.by}
+    if isinstance(ev, SubAgentEvent):
+        return {"type": "subagent", "pid": ev.pid, "role": ev.role, "task": ev.task, "status": ev.status}
+    if isinstance(ev, SecurityAlertEvent):
+        return {"type": "security_alert", "tool": ev.tool, "args": ev.args, "reason": ev.reason, "blocked": ev.blocked}
+    # sop-agent base events
     if isinstance(ev, TokenEvent):
         return {"type": "token", "step_id": ev.step_id, "delta": ev.delta}
     if isinstance(ev, TurnEvent):
@@ -244,6 +265,69 @@ def sop_run_approve(run_id: str, req: ApproveRequest) -> dict[str, Any]:
     store["decision"] = "reject" if req.decision == "reject" else "approve"
     store["event"].set()
     return {"ok": True}
+
+
+# --------------------------------------------------------------------------- meowwork multi-agent
+class MeowWorkRunRequest(BaseModel):
+    task: str
+    provider: str | None = None
+    model: str | None = None
+
+
+_meowwork_runs: dict[str, dict[str, Any]] = {}
+
+
+@app.post("/meowwork/run")
+def start_meowwork_run(req: MeowWorkRunRequest) -> dict[str, Any]:
+    """Start a four-cat collaboration run in the background; poll or WS for events."""
+    settings = Settings.from_env()
+    orch = build_orchestrator(req.task, settings, provider=req.provider, model=req.model)
+    run_id = uuid.uuid4().hex
+    store: dict[str, Any] = {"orch": orch, "events": [], "done": False}
+    _meowwork_runs[run_id] = store
+    threading.Thread(target=_drive_owner, args=(store, orch), daemon=True).start()
+    lc = orch.roles["planner"].llm
+    return {"run_id": run_id, "task": req.task, "roles": list(orch.roles.keys()),
+            "model": {"provider": lc.provider, "model": lc.model}}
+
+
+@app.get("/meowwork/run/{run_id}/events")
+def meowwork_run_events(run_id: str, since: int = Query(0)) -> dict[str, Any]:
+    store = _meowwork_runs.get(run_id)
+    if store is None:
+        raise HTTPException(status_code=404, detail="unknown run_id")
+    return {
+        "events": store["events"][since:],
+        "done": store["done"],
+        "next_offset": len(store["events"]),
+        "state": store["orch"].state.to_dict(),
+    }
+
+
+@app.websocket("/ws/meowwork/{run_id}")
+async def ws_meowwork(ws: WebSocket, run_id: str) -> None:
+    """Live event stream for a MeowWork run: one JSON per event + final state."""
+    store = _meowwork_runs.get(run_id)
+    if store is None:
+        await ws.accept()
+        await ws.send_json({"type": "error", "message": "unknown run_id"})
+        await ws.close()
+        return
+    await ws.accept()
+    offset = 0
+    try:
+        while True:
+            evs = store["events"][offset:]
+            offset = len(store["events"])
+            for ev in evs:
+                await ws.send_json(ev)
+            if store["done"] and not evs:
+                await ws.send_json({"type": "final_state", "state": store["orch"].state.to_dict()})
+                break
+            await asyncio.sleep(0.1)
+    except WebSocketDisconnect:
+        pass
+    await ws.close()
 
 
 @app.post("/sop/validate")
