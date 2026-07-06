@@ -1,0 +1,21 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { color-scheme: dark; }
+
+html, body { height: 100%; }
+body {
+  background: var(--tw-color-bg, #0a0e14);
+  color: #c9d1d9;
+  font-family: system-ui, -apple-system, sans-serif;
+}
+
+/* custom scrollbar for cat panels */
+.cat-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+.cat-scroll::-webkit-scrollbar-track { background: transparent; }
+.cat-scroll::-webkit-scrollbar-thumb { background: #1f2733; border-radius: 3px; }
+.cat-scroll::-webkit-scrollbar-thumb:hover { background: #2d3748; }
+
+/* matrix-green waterfall for validator */
+.matrix-glow { text-shadow: 0 0 6px rgba(63,185,80,0.6); }
